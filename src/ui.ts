@@ -9,6 +9,8 @@ import {
   TextRenderable,
   createCliRenderer,
   type KeyEvent,
+  MouseButton,
+  type MouseEvent as TuiMouseEvent,
   type Selection,
 } from "@opentui/core"
 import { resumeSession } from "./resume"
@@ -475,6 +477,52 @@ export async function startTui(): Promise<void> {
     process.exit(exitCode)
   }
 
+  const getSelectInternals = () =>
+    sessionSelect as unknown as {
+      scrollOffset: number
+      linesPerItem: number
+      maxVisibleItems: number
+    }
+
+  const selectFromMouse = (event: TuiMouseEvent) => {
+    const internals = getSelectInternals()
+    const previousOffset = internals.scrollOffset
+    const relativeY = event.y - sessionSelect.y
+    if (relativeY < 0 || relativeY >= sessionSelect.height) {
+      return
+    }
+
+    const lineHeight = Math.max(1, internals.linesPerItem || 1)
+    const row = Math.floor(relativeY / lineHeight)
+    const targetIndex = internals.scrollOffset + row
+    if (targetIndex < 0 || targetIndex >= state.filtered.length) {
+      return
+    }
+
+    sessionSelect.focus()
+    sessionSelect.setSelectedIndex(targetIndex)
+    internals.scrollOffset = previousOffset
+    sessionSelect.requestRender()
+  }
+
+  const selectClientFilterFromMouse = (event: TuiMouseEvent) => {
+    const relativeX = event.x - clientTabs.x
+    if (relativeX < 0 || relativeX >= clientTabs.width) {
+      return
+    }
+
+    const tabWidth = Math.max(1, clientTabs.tabWidth)
+    const tabState = clientTabs as unknown as { scrollOffset?: number }
+    const scrollOffset = Math.max(0, tabState.scrollOffset ?? 0)
+    const targetIndex = Math.floor(relativeX / tabWidth) + scrollOffset
+    if (targetIndex < 0 || targetIndex >= clientTabs.options.length) {
+      return
+    }
+
+    clientTabs.focus()
+    clientTabs.setSelectedIndex(targetIndex)
+  }
+
   const copyMouseSelectionToClipboard = (selection: Selection) => {
     if (selectionCopyTimer) {
       clearTimeout(selectionCopyTimer)
@@ -516,6 +564,49 @@ export async function startTui(): Promise<void> {
 
     copyMouseSelectionToClipboard(selection)
   })
+
+  sessionSelect.onMouseScroll = (event: TuiMouseEvent) => {
+    sessionSelect.focus()
+    const steps = Math.max(1, event.scroll?.delta ?? 1)
+    const internals = getSelectInternals()
+    const maxVisibleItems = Math.max(1, internals.maxVisibleItems || 1)
+    const maxOffset = Math.max(0, state.filtered.length - maxVisibleItems)
+
+    if (maxOffset === 0) {
+      return
+    }
+
+    const direction = event.scroll?.direction
+    const nextOffset =
+      direction === "up"
+        ? Math.max(0, internals.scrollOffset - steps)
+        : direction === "down"
+          ? Math.min(maxOffset, internals.scrollOffset + steps)
+          : internals.scrollOffset
+
+    if (nextOffset === internals.scrollOffset) {
+      return
+    }
+
+    internals.scrollOffset = nextOffset
+    sessionSelect.requestRender()
+  }
+
+  sessionSelect.onMouseDown = (event: TuiMouseEvent) => {
+    if (event.button !== MouseButton.LEFT) {
+      return
+    }
+
+    selectFromMouse(event)
+  }
+
+  clientTabs.onMouseDown = (event: TuiMouseEvent) => {
+    if (event.button !== MouseButton.LEFT) {
+      return
+    }
+
+    selectClientFilterFromMouse(event)
+  }
 
   sessionSelect.on(SelectRenderableEvents.SELECTION_CHANGED, (index: number) => {
     state.selectedIndex = index
