@@ -9,6 +9,7 @@ import {
   TextRenderable,
   createCliRenderer,
   type KeyEvent,
+  type Selection,
 } from "@opentui/core"
 import { resumeSession } from "./resume"
 import { loadSessions } from "./sources"
@@ -152,6 +153,8 @@ export async function startTui(): Promise<void> {
   const renderer = await createCliRenderer({
     exitOnCtrlC: true,
     targetFps: 30,
+    useMouse: true,
+    enableMouseMovement: true,
   })
 
   const state: SessionViewState = {
@@ -163,6 +166,9 @@ export async function startTui(): Promise<void> {
   }
 
   let focusTarget: "search" | "client" | "list" = "list"
+  let statusRestoreTimer: ReturnType<typeof setTimeout> | undefined
+  let selectionCopyTimer: ReturnType<typeof setTimeout> | undefined
+  let lastCopiedSelectionText = ""
 
   const root = new BoxRenderable(renderer, {
     width: "100%",
@@ -263,7 +269,7 @@ export async function startTui(): Promise<void> {
   body.add(detailsPanel)
 
   const footer = new TextRenderable(renderer, {
-    content: "Keys: Tab switch focus | 1-6 client filter | Enter/R resume | U refresh | Q quit",
+    content: "Keys: Tab focus | 1-6 filter | Enter/R resume | Mouse select copies | U refresh | Q quit",
   })
 
   const status = new TextRenderable(renderer, {
@@ -309,6 +315,24 @@ export async function startTui(): Promise<void> {
     }
   }
 
+  const baseStatusText = () =>
+    `Loaded ${state.filtered.length} of ${state.all.length} sessions (${sourceFilterLabel(state.sourceFilter)})`
+
+  const setBaseStatus = () => {
+    status.content = baseStatusText()
+  }
+
+  const showStatusToast = (message: string, durationMs = 1200) => {
+    status.content = message
+    if (statusRestoreTimer) {
+      clearTimeout(statusRestoreTimer)
+    }
+
+    statusRestoreTimer = setTimeout(() => {
+      setBaseStatus()
+    }, durationMs)
+  }
+
   const syncViewportLayout = () => {
     const estimatedBodyHeight = renderer.height - 18
     sessionSelect.height = Math.max(8, estimatedBodyHeight - 4)
@@ -327,7 +351,7 @@ export async function startTui(): Promise<void> {
     clientTabs.setSelectedIndex(Math.max(0, previousIndex))
     applyFilter(state)
     renderList()
-    status.content = `Loaded ${state.filtered.length} of ${state.all.length} sessions (${sourceFilterLabel(state.sourceFilter)})`
+    setBaseStatus()
   }
 
   const launchSelected = async () => {
@@ -349,9 +373,52 @@ export async function startTui(): Promise<void> {
     process.exit(exitCode)
   }
 
+  const copyMouseSelectionToClipboard = (selection: Selection) => {
+    if (selectionCopyTimer) {
+      clearTimeout(selectionCopyTimer)
+    }
+
+    selectionCopyTimer = setTimeout(() => {
+      const selectedText = selection.getSelectedText().trim()
+      if (!selectedText || selectedText === lastCopiedSelectionText) {
+        return
+      }
+
+      const copied = renderer.copyToClipboardOSC52(selectedText)
+      if (!copied) {
+        showStatusToast("Clipboard copy unavailable in this terminal")
+        return
+      }
+
+      lastCopiedSelectionText = selectedText
+      showStatusToast("Copied to clipboard")
+    }, 120)
+  }
+
+  const clearTransientTimers = () => {
+    if (statusRestoreTimer) {
+      clearTimeout(statusRestoreTimer)
+      statusRestoreTimer = undefined
+    }
+
+    if (selectionCopyTimer) {
+      clearTimeout(selectionCopyTimer)
+      selectionCopyTimer = undefined
+    }
+  }
+
+  renderer.on("selection", (selection: Selection) => {
+    if (!selection) {
+      return
+    }
+
+    copyMouseSelectionToClipboard(selection)
+  })
+
   sessionSelect.on(SelectRenderableEvents.SELECTION_CHANGED, (index: number) => {
     state.selectedIndex = index
-    detailsText.content = renderSessionDetails(state.filtered[index])
+    const selected = state.filtered[index]
+    detailsText.content = renderSessionDetails(selected)
   })
 
   sessionSelect.on(SelectRenderableEvents.ITEM_SELECTED, async () => {
@@ -362,7 +429,7 @@ export async function startTui(): Promise<void> {
     state.filterText = value
     applyFilter(state)
     renderList()
-    status.content = `Loaded ${state.filtered.length} of ${state.all.length} sessions (${sourceFilterLabel(state.sourceFilter)})`
+    setBaseStatus()
   })
 
   clientTabs.on(TabSelectRenderableEvents.SELECTION_CHANGED, (index: number) => {
@@ -374,7 +441,7 @@ export async function startTui(): Promise<void> {
     state.sourceFilter = nextFilter.key
     applyFilter(state)
     renderList()
-    status.content = `Loaded ${state.filtered.length} of ${state.all.length} sessions (${sourceFilterLabel(state.sourceFilter)})`
+    setBaseStatus()
   })
 
   clientTabs.on(TabSelectRenderableEvents.ITEM_SELECTED, (index: number) => {
@@ -386,7 +453,7 @@ export async function startTui(): Promise<void> {
     state.sourceFilter = nextFilter.key
     applyFilter(state)
     renderList()
-    status.content = `Loaded ${state.filtered.length} of ${state.all.length} sessions (${sourceFilterLabel(state.sourceFilter)})`
+    setBaseStatus()
   })
 
   renderer.keyInput.on("keypress", async (key: KeyEvent) => {
@@ -412,12 +479,13 @@ export async function startTui(): Promise<void> {
         state.sourceFilter = nextFilter.key
         applyFilter(state)
         renderList()
-        status.content = `Loaded ${state.filtered.length} of ${state.all.length} sessions (${sourceFilterLabel(state.sourceFilter)})`
+        setBaseStatus()
       }
       return
     }
 
     if (key.name === "q") {
+      clearTransientTimers()
       await renderer.destroy()
       process.exit(0)
     }
