@@ -1,20 +1,28 @@
 import path from "node:path"
 import type { SessionRecord, SessionSource } from "../types"
-import { fileStat } from "../utils/fs"
+import { fileStat, readTextSample, scanFilesByPatterns } from "../utils/fs"
 import { prettySource, truncate } from "../utils/format"
-import { parseJsonSafe, scanFileBackedSessions } from "./shared"
+import { parseJsonSafe } from "./shared"
 
-const FALLBACK_ROOTS = [
+/** De-duplicates path candidates while preserving order. */
+function uniquePaths(paths: string[]): string[] {
+  return Array.from(new Set(paths))
+}
+
+const FALLBACK_ROOTS = uniquePaths([
   "~/.local/share/opencode",
+  "~/.local/share/OpenCode",
   "~/Library/Application Support/opencode",
+  "~/Library/Application Support/OpenCode",
   "~/.config/opencode",
-]
+  "~/.config/OpenCode",
+  "~/.opencode",
+])
 
 const FALLBACK_PATTERNS = [
-  "sessions/**/*.json",
-  "sessions/**/*.jsonl",
-  "**/*session*.json",
-  "**/*session*.jsonl",
+  "storage/session/**/ses_*.json",
+  "project/**/storage/session/info/ses_*.json",
+  "project/**/storage/session/share/ses_*.json",
 ]
 
 function runOpenCodeSessionList(): SessionRecord[] {
@@ -105,22 +113,122 @@ function normalizeDate(value: unknown): number | undefined {
   return undefined
 }
 
+function extractSessionIdFromPath(filePath: string): string | undefined {
+  const fromPath = filePath.match(/\/(ses_[A-Za-z0-9]+)\//)
+  if (fromPath?.[1]) {
+    return fromPath[1]
+  }
+
+  const fromName = path.basename(filePath).match(/(ses_[A-Za-z0-9]+)/)
+  return fromName?.[1]
+}
+
+interface ParsedOpenCodeSessionMeta {
+  id: string
+  title?: string
+  directory?: string
+  created?: number
+  updated?: number
+}
+
+function parseOpenCodeSessionMeta(raw: string): ParsedOpenCodeSessionMeta | undefined {
+  const parsed = parseJsonSafe(raw)
+  if (!parsed || typeof parsed !== "object") {
+    return undefined
+  }
+
+  const value = parsed as Record<string, unknown>
+  const id = typeof value.id === "string" ? value.id : undefined
+  if (!id || !id.startsWith("ses_")) {
+    return undefined
+  }
+
+  const time = value.time && typeof value.time === "object" ? (value.time as Record<string, unknown>) : undefined
+  const created = typeof time?.created === "number" ? time.created : undefined
+  const updated = typeof time?.updated === "number" ? time.updated : undefined
+
+  return {
+    id,
+    title: typeof value.title === "string" ? value.title : undefined,
+    directory: typeof value.directory === "string" ? value.directory : undefined,
+    created,
+    updated,
+  }
+}
+
+function dedupeOpencodeSessions(sessions: SessionRecord[]): SessionRecord[] {
+  const byUid = new Map<string, SessionRecord>()
+
+  for (const session of sessions) {
+    const pathSessionId = session.filePath ? extractSessionIdFromPath(session.filePath) : undefined
+    const existingSessionId = session.sessionId
+    const looksLikeMessageOrPartId =
+      typeof existingSessionId === "string" &&
+      (existingSessionId.startsWith("msg_") || existingSessionId.startsWith("prt_"))
+    const inferredSessionId =
+      pathSessionId ?? (looksLikeMessageOrPartId ? undefined : existingSessionId)
+    const dedupeKey = inferredSessionId ? `opencode:${inferredSessionId}` : session.uid
+
+    const normalized: SessionRecord = {
+      ...session,
+      sessionId: inferredSessionId ?? session.sessionId,
+      uid: dedupeKey,
+    }
+
+    const existing = byUid.get(dedupeKey)
+    if (!existing || normalized.updatedAt > existing.updatedAt) {
+      byUid.set(dedupeKey, normalized)
+    }
+  }
+
+  return Array.from(byUid.values()).sort((a, b) => b.updatedAt - a.updatedAt)
+}
+
 async function listFallback(): Promise<SessionRecord[]> {
-  return scanFileBackedSessions({
-    source: "opencode",
-    sourceLabel: prettySource("opencode"),
+  const files = await scanFilesByPatterns({
     roots: FALLBACK_ROOTS,
     patterns: FALLBACK_PATTERNS,
-    maxFiles: 120,
-    buildResumeAction: ({ sessionId, filePath }) => ({
-      command: "opencode",
-      args: sessionId ? ["--session", sessionId] : ["run", "--continue", "--file", filePath],
-    }),
-    buildResumeHint: ({ filePath }) => {
-      const relativeName = path.basename(filePath)
-      return `OpenCode fallback from ${relativeName}`
-    },
+    maxFiles: 5000,
   })
+
+  const sessions = await Promise.all(
+    files.map(async (filePath): Promise<SessionRecord | null> => {
+      const stat = await fileStat(filePath)
+      if (!stat) {
+        return null
+      }
+
+      const rawContent = await readTextSample(filePath, 8192)
+      const parsed = parseOpenCodeSessionMeta(rawContent)
+      if (!parsed) {
+        return null
+      }
+
+      const sessionId = parsed.id
+      const title =
+        (parsed.title && parsed.title.trim().length > 0 ? parsed.title.trim() : undefined) ??
+        `Session ${sessionId.slice(0, 14)}`
+
+      return {
+        uid: `opencode:${sessionId}`,
+        source: "opencode",
+        sourceLabel: prettySource("opencode"),
+        sessionId,
+        title: truncate(title, 90),
+        summary: parsed.directory ? truncate(parsed.directory, 180) : undefined,
+        workspacePath: parsed.directory,
+        updatedAt: parsed.updated ?? stat.mtimeMs,
+        startedAt: parsed.created ?? stat.birthtimeMs,
+        resumeAction: {
+          command: "opencode",
+          args: ["--session", sessionId],
+        },
+        resumeHint: "Runs `opencode --session <id>`",
+      }
+    }),
+  )
+
+  return sessions.filter((session): session is SessionRecord => Boolean(session))
 }
 
 export const opencodeSource: SessionSource = {
@@ -128,10 +236,6 @@ export const opencodeSource: SessionSource = {
   label: "OpenCode",
   async listSessions(): Promise<SessionRecord[]> {
     const fromCli = runOpenCodeSessionList()
-    if (fromCli.length > 0) {
-      return fromCli
-    }
-
     const fromFiles = await listFallback()
 
     const enriched = await Promise.all(
@@ -148,6 +252,6 @@ export const opencodeSource: SessionSource = {
       }),
     )
 
-    return enriched
+    return dedupeOpencodeSessions([...fromCli, ...enriched])
   },
 }
