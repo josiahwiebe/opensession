@@ -170,17 +170,14 @@ export async function startTui(): Promise<void> {
     flexDirection: "column",
     padding: 1,
     gap: 1,
-    backgroundColor: "#101218",
   })
 
   const title = new TextRenderable(renderer, {
     content: "Open Session Manager",
-    fg: "#7ec8ff",
   })
 
   const subtitle = new TextRenderable(renderer, {
     content: "Unified chat history for Claude, Cursor, Gemini, OpenCode, and Codex",
-    fg: "#9aa5b1",
   })
 
   const filterRow = new BoxRenderable(renderer, {
@@ -191,21 +188,15 @@ export async function startTui(): Promise<void> {
     padding: 0,
     flexDirection: "row",
     gap: 1,
-    borderColor: "#2d3645",
   })
 
   const filterLabel = new TextRenderable(renderer, {
     content: "Search:",
-    fg: "#d7deea",
   })
 
   const filterInput = new InputRenderable(renderer, {
     width: 60,
     placeholder: "type to filter sessions...",
-    backgroundColor: "#1b2230",
-    focusedBackgroundColor: "#253145",
-    textColor: "#f7fafc",
-    cursorColor: "#7ec8ff",
   })
 
   filterRow.add(filterLabel)
@@ -217,19 +208,12 @@ export async function startTui(): Promise<void> {
     borderStyle: "single",
     title: "Client Filter",
     padding: 0,
-    borderColor: "#2d3645",
   })
 
   const clientTabs = new TabSelectRenderable(renderer, {
     width: 68,
     tabWidth: 14,
     options: buildClientTabOptions(state.all),
-    backgroundColor: "#121a24",
-    focusedBackgroundColor: "#1a2533",
-    selectedBackgroundColor: "#2a3f5f",
-    selectedTextColor: "#ffffff",
-    textColor: "#d7deea",
-    selectedDescriptionColor: "#d5e4ff",
     showDescription: false,
     showUnderline: false,
     wrapSelection: true,
@@ -249,7 +233,6 @@ export async function startTui(): Promise<void> {
     flexGrow: 0,
     borderStyle: "single",
     title: "Sessions",
-    borderColor: "#2d3645",
     padding: 1,
   })
 
@@ -257,13 +240,6 @@ export async function startTui(): Promise<void> {
     width: 48,
     height: 20,
     options: [],
-    backgroundColor: "#121a24",
-    focusedBackgroundColor: "#1a2533",
-    selectedBackgroundColor: "#2a3f5f",
-    selectedTextColor: "#ffffff",
-    textColor: "#d7deea",
-    descriptionColor: "#95a3b7",
-    selectedDescriptionColor: "#d5e4ff",
     showDescription: true,
     showScrollIndicator: true,
     wrapSelection: false,
@@ -275,13 +251,11 @@ export async function startTui(): Promise<void> {
     flexGrow: 1,
     borderStyle: "single",
     title: "Session Details",
-    borderColor: "#2d3645",
     padding: 1,
   })
 
   const detailsText = new TextRenderable(renderer, {
     content: "Loading sessions...",
-    fg: "#d7deea",
   })
 
   detailsPanel.add(detailsText)
@@ -290,12 +264,10 @@ export async function startTui(): Promise<void> {
 
   const footer = new TextRenderable(renderer, {
     content: "Keys: Tab switch focus | 1-6 client filter | Enter/R resume | U refresh | Q quit",
-    fg: "#8aa0bf",
   })
 
   const status = new TextRenderable(renderer, {
     content: "Loading...",
-    fg: "#7ea4d6",
   })
 
   root.add(title)
