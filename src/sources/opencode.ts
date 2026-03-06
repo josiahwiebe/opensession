@@ -1,4 +1,3 @@
-import path from "node:path"
 import type { SessionRecord, SessionSource } from "../types"
 import { fileStat, readTextSample, scanFilesByPatterns } from "../utils/fs"
 import { prettySource, truncate } from "../utils/format"
@@ -25,7 +24,42 @@ const FALLBACK_PATTERNS = [
   "project/**/storage/session/share/ses_*.json",
 ]
 
-function runOpenCodeSessionList(): SessionRecord[] {
+interface ParsedOpenCodeSessionMeta {
+  id: string
+  title?: string
+  directory?: string
+  created?: number
+  updated?: number
+  parentSessionId?: string
+}
+
+interface OpenCodeSessionRecord extends SessionRecord {
+  parentSessionId?: string
+}
+
+function normalizeDate(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 10_000_000_000 ? value : value * 1000
+  }
+
+  if (typeof value === "string" && value.length > 0) {
+    const date = Date.parse(value)
+    return Number.isNaN(date) ? undefined : date
+  }
+
+  return undefined
+}
+
+function parseParentSessionId(item: unknown): string | undefined {
+  if (!item || typeof item !== "object") {
+    return undefined
+  }
+
+  const value = item as Record<string, unknown>
+  return typeof value.parentID === "string" ? value.parentID : undefined
+}
+
+function runOpenCodeSessionList(): OpenCodeSessionRecord[] {
   const proc = Bun.spawnSync({
     cmd: ["opencode", "session", "list", "--format", "json"],
     stderr: "pipe",
@@ -48,8 +82,8 @@ function runOpenCodeSessionList(): SessionRecord[] {
       ? (data as any).sessions
       : []
 
-  const parsed = items
-    .map((item: any): SessionRecord | null => {
+  return items
+    .map((item: any): OpenCodeSessionRecord | null => {
       const sessionId =
         item?.id ?? item?.sessionID ?? item?.sessionId ?? item?.uuid ?? item?.name ?? undefined
       if (!sessionId || typeof sessionId !== "string") {
@@ -80,6 +114,7 @@ function runOpenCodeSessionList(): SessionRecord[] {
         source: "opencode",
         sourceLabel: "OpenCode",
         sessionId,
+        parentSessionId: parseParentSessionId(item),
         title: truncate(title, 90),
         summary: typeof item?.summary === "string" ? truncate(item.summary, 180) : undefined,
         updatedAt,
@@ -95,40 +130,7 @@ function runOpenCodeSessionList(): SessionRecord[] {
         resumeHint: "Runs `opencode --session <id>`",
       }
     })
-    .filter((value: SessionRecord | null): value is SessionRecord => Boolean(value))
-
-  return parsed
-}
-
-function normalizeDate(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value > 10_000_000_000 ? value : value * 1000
-  }
-
-  if (typeof value === "string" && value.length > 0) {
-    const date = Date.parse(value)
-    return Number.isNaN(date) ? undefined : date
-  }
-
-  return undefined
-}
-
-function extractSessionIdFromPath(filePath: string): string | undefined {
-  const fromPath = filePath.match(/\/(ses_[A-Za-z0-9]+)\//)
-  if (fromPath?.[1]) {
-    return fromPath[1]
-  }
-
-  const fromName = path.basename(filePath).match(/(ses_[A-Za-z0-9]+)/)
-  return fromName?.[1]
-}
-
-interface ParsedOpenCodeSessionMeta {
-  id: string
-  title?: string
-  directory?: string
-  created?: number
-  updated?: number
+    .filter((value: OpenCodeSessionRecord | null): value is OpenCodeSessionRecord => Boolean(value))
 }
 
 function parseOpenCodeSessionMeta(raw: string): ParsedOpenCodeSessionMeta | undefined {
@@ -153,38 +155,11 @@ function parseOpenCodeSessionMeta(raw: string): ParsedOpenCodeSessionMeta | unde
     directory: typeof value.directory === "string" ? value.directory : undefined,
     created,
     updated,
+    parentSessionId: typeof value.parentID === "string" ? value.parentID : undefined,
   }
 }
 
-function dedupeOpencodeSessions(sessions: SessionRecord[]): SessionRecord[] {
-  const byUid = new Map<string, SessionRecord>()
-
-  for (const session of sessions) {
-    const pathSessionId = session.filePath ? extractSessionIdFromPath(session.filePath) : undefined
-    const existingSessionId = session.sessionId
-    const looksLikeMessageOrPartId =
-      typeof existingSessionId === "string" &&
-      (existingSessionId.startsWith("msg_") || existingSessionId.startsWith("prt_"))
-    const inferredSessionId =
-      pathSessionId ?? (looksLikeMessageOrPartId ? undefined : existingSessionId)
-    const dedupeKey = inferredSessionId ? `opencode:${inferredSessionId}` : session.uid
-
-    const normalized: SessionRecord = {
-      ...session,
-      sessionId: inferredSessionId ?? session.sessionId,
-      uid: dedupeKey,
-    }
-
-    const existing = byUid.get(dedupeKey)
-    if (!existing || normalized.updatedAt > existing.updatedAt) {
-      byUid.set(dedupeKey, normalized)
-    }
-  }
-
-  return Array.from(byUid.values()).sort((a, b) => b.updatedAt - a.updatedAt)
-}
-
-async function listFallback(): Promise<SessionRecord[]> {
+async function listFallback(): Promise<OpenCodeSessionRecord[]> {
   const files = await scanFilesByPatterns({
     roots: FALLBACK_ROOTS,
     patterns: FALLBACK_PATTERNS,
@@ -192,7 +167,7 @@ async function listFallback(): Promise<SessionRecord[]> {
   })
 
   const sessions = await Promise.all(
-    files.map(async (filePath): Promise<SessionRecord | null> => {
+    files.map(async (filePath): Promise<OpenCodeSessionRecord | null> => {
       const stat = await fileStat(filePath)
       if (!stat) {
         return null
@@ -214,6 +189,7 @@ async function listFallback(): Promise<SessionRecord[]> {
         source: "opencode",
         sourceLabel: prettySource("opencode"),
         sessionId,
+        parentSessionId: parsed.parentSessionId,
         title: truncate(title, 90),
         summary: parsed.directory ? truncate(parsed.directory, 180) : undefined,
         workspacePath: parsed.directory,
@@ -228,7 +204,97 @@ async function listFallback(): Promise<SessionRecord[]> {
     }),
   )
 
-  return sessions.filter((session): session is SessionRecord => Boolean(session))
+  return sessions.filter((session): session is OpenCodeSessionRecord => Boolean(session))
+}
+
+function dedupeOpencodeSessions(sessions: OpenCodeSessionRecord[]): OpenCodeSessionRecord[] {
+  const bySessionId = new Map<string, OpenCodeSessionRecord>()
+
+  for (const session of sessions) {
+    if (!session.sessionId) {
+      continue
+    }
+
+    const key = session.sessionId
+    const existing = bySessionId.get(key)
+    if (!existing) {
+      bySessionId.set(key, session)
+      continue
+    }
+
+    const latest = session.updatedAt >= existing.updatedAt ? session : existing
+    const older = latest === session ? existing : session
+    bySessionId.set(key, {
+      ...older,
+      ...latest,
+      parentSessionId: latest.parentSessionId ?? older.parentSessionId,
+      workspacePath: latest.workspacePath ?? older.workspacePath,
+      summary: latest.summary ?? older.summary,
+      startedAt: latest.startedAt ?? older.startedAt,
+      resumeAction: latest.resumeAction ?? older.resumeAction,
+      resumeHint: latest.resumeHint ?? older.resumeHint,
+    })
+  }
+
+  return Array.from(bySessionId.values()).sort((a, b) => b.updatedAt - a.updatedAt)
+}
+
+function toPublicRecord(session: OpenCodeSessionRecord): SessionRecord {
+  return {
+    uid: session.uid,
+    source: session.source,
+    sourceLabel: session.sourceLabel,
+    sessionId: session.sessionId,
+    title: session.title,
+    summary: session.summary,
+    filePath: session.filePath,
+    workspacePath: session.workspacePath,
+    updatedAt: session.updatedAt,
+    startedAt: session.startedAt,
+    resumeAction: session.resumeAction,
+    resumeHint: session.resumeHint,
+  }
+}
+
+function collapseSubagentSessions(sessions: OpenCodeSessionRecord[]): SessionRecord[] {
+  const bySessionId = new Map<string, OpenCodeSessionRecord>()
+  for (const session of sessions) {
+    if (session.sessionId) {
+      bySessionId.set(session.sessionId, session)
+    }
+  }
+
+  const childCountByParent = new Map<string, number>()
+  for (const session of sessions) {
+    const parentId = session.parentSessionId
+    if (!parentId || !bySessionId.has(parentId)) {
+      continue
+    }
+
+    childCountByParent.set(parentId, (childCountByParent.get(parentId) ?? 0) + 1)
+  }
+
+  return sessions
+    .filter((session) => {
+      const parentId = session.parentSessionId
+      return !(parentId && bySessionId.has(parentId))
+    })
+    .map((session) => {
+      const childCount = session.sessionId ? (childCountByParent.get(session.sessionId) ?? 0) : 0
+      if (childCount === 0) {
+        return toPublicRecord(session)
+      }
+
+      const childLabel = `${childCount} subagent ${childCount === 1 ? "session" : "sessions"}`
+      return {
+        ...toPublicRecord(session),
+        summary: truncate(
+          session.summary ? `${session.summary} - ${childLabel}` : childLabel,
+          180,
+        ),
+      }
+    })
+    .sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
 export const opencodeSource: SessionSource = {
@@ -237,21 +303,7 @@ export const opencodeSource: SessionSource = {
   async listSessions(): Promise<SessionRecord[]> {
     const fromCli = runOpenCodeSessionList()
     const fromFiles = await listFallback()
-
-    const enriched = await Promise.all(
-      fromFiles.map(async (session) => {
-        if (!session.filePath) {
-          return session
-        }
-
-        const stat = await fileStat(session.filePath)
-        return {
-          ...session,
-          updatedAt: stat?.mtimeMs ?? session.updatedAt,
-        }
-      }),
-    )
-
-    return dedupeOpencodeSessions([...fromCli, ...enriched])
+    const deduped = dedupeOpencodeSessions([...fromCli, ...fromFiles])
+    return collapseSubagentSessions(deduped)
   },
 }
