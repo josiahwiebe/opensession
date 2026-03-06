@@ -30,6 +30,17 @@ interface SourceFilterOption {
   description: string
 }
 
+interface UiTheme {
+  text: string
+  accent: string
+  mutedText: string
+  border: string
+  listBackground: string
+  listFocusedBackground: string
+  listSelectedBackground: string
+  listDescription: string
+}
+
 const SOURCE_FILTERS: SourceFilterOption[] = [
   { key: "all", label: "All", description: "every client" },
   { key: "claude", label: "Claude", description: "claude code" },
@@ -38,6 +49,68 @@ const SOURCE_FILTERS: SourceFilterOption[] = [
   { key: "gemini", label: "Gemini", description: "gemini cli" },
   { key: "opencode", label: "OpenCode", description: "opencode" },
 ]
+
+function parseHexColor(value: string): { r: number; g: number; b: number } | undefined {
+  const match = value.trim().match(/^#?([0-9a-fA-F]{6})$/)
+  const hex = match?.[1]
+  if (!hex) {
+    return undefined
+  }
+
+  return {
+    r: Number.parseInt(hex.slice(0, 2), 16),
+    g: Number.parseInt(hex.slice(2, 4), 16),
+    b: Number.parseInt(hex.slice(4, 6), 16),
+  }
+}
+
+function toHexColor(rgb: { r: number; g: number; b: number }): string {
+  const channel = (value: number) => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0")
+  return `#${channel(rgb.r)}${channel(rgb.g)}${channel(rgb.b)}`
+}
+
+function blendHex(base: string, target: string, amount: number): string {
+  const baseRgb = parseHexColor(base)
+  const targetRgb = parseHexColor(target)
+  if (!baseRgb || !targetRgb) {
+    return base
+  }
+
+  const mix = Math.max(0, Math.min(1, amount))
+  return toHexColor({
+    r: baseRgb.r + (targetRgb.r - baseRgb.r) * mix,
+    g: baseRgb.g + (targetRgb.g - baseRgb.g) * mix,
+    b: baseRgb.b + (targetRgb.b - baseRgb.b) * mix,
+  })
+}
+
+function isDarkColor(hex: string): boolean {
+  const rgb = parseHexColor(hex)
+  if (!rgb) {
+    return true
+  }
+
+  const luminance = (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255
+  return luminance < 0.55
+}
+
+function buildUiTheme(defaultBackground?: string | null, defaultForeground?: string | null, accentCandidate?: string | null): UiTheme {
+  const background = parseHexColor(defaultBackground ?? "") ? (defaultBackground as string) : "#1f2430"
+  const foreground = parseHexColor(defaultForeground ?? "") ? (defaultForeground as string) : "#d8dee9"
+  const accent = parseHexColor(accentCandidate ?? "") ? (accentCandidate as string) : "#88c0d0"
+
+  const dark = isDarkColor(background)
+  return {
+    text: foreground,
+    accent,
+    mutedText: dark ? blendHex(foreground, background, 0.32) : blendHex(foreground, background, 0.45),
+    border: dark ? blendHex(background, foreground, 0.22) : blendHex(background, foreground, 0.32),
+    listBackground: dark ? blendHex(background, foreground, 0.05) : blendHex(background, foreground, 0.02),
+    listFocusedBackground: dark ? blendHex(background, foreground, 0.09) : blendHex(background, foreground, 0.05),
+    listSelectedBackground: dark ? blendHex(background, accent, 0.28) : blendHex(background, accent, 0.18),
+    listDescription: dark ? blendHex(foreground, background, 0.42) : blendHex(foreground, background, 0.52),
+  }
+}
 
 function countBySource(sessions: SessionRecord[]): Record<SessionSourceId, number> {
   return sessions.reduce<Record<SessionSourceId, number>>(
@@ -157,6 +230,13 @@ export async function startTui(): Promise<void> {
     enableMouseMovement: true,
   })
 
+  const palette = await renderer.getPalette().catch(() => undefined)
+  const theme = buildUiTheme(
+    palette?.defaultBackground,
+    palette?.defaultForeground,
+    palette?.palette?.[6] ?? palette?.cursorColor,
+  )
+
   const state: SessionViewState = {
     all: [],
     filtered: [],
@@ -180,10 +260,12 @@ export async function startTui(): Promise<void> {
 
   const title = new TextRenderable(renderer, {
     content: "Open Session Manager",
+    fg: theme.accent,
   })
 
   const subtitle = new TextRenderable(renderer, {
     content: "Unified chat history for Claude, Cursor, Gemini, OpenCode, and Codex",
+    fg: theme.mutedText,
   })
 
   const filterRow = new BoxRenderable(renderer, {
@@ -194,6 +276,7 @@ export async function startTui(): Promise<void> {
     padding: 0,
     flexDirection: "row",
     gap: 1,
+    borderColor: theme.border,
   })
 
   const filterLabel = new TextRenderable(renderer, {
@@ -214,12 +297,20 @@ export async function startTui(): Promise<void> {
     borderStyle: "single",
     title: "Client Filter",
     padding: 0,
+    borderColor: theme.border,
   })
 
   const clientTabs = new TabSelectRenderable(renderer, {
     width: 68,
     tabWidth: 14,
     options: buildClientTabOptions(state.all),
+    backgroundColor: theme.listBackground,
+    textColor: theme.text,
+    focusedBackgroundColor: theme.listFocusedBackground,
+    focusedTextColor: theme.text,
+    selectedBackgroundColor: theme.listSelectedBackground,
+    selectedTextColor: theme.text,
+    selectedDescriptionColor: theme.mutedText,
     showDescription: false,
     showUnderline: false,
     wrapSelection: true,
@@ -240,12 +331,21 @@ export async function startTui(): Promise<void> {
     borderStyle: "single",
     title: "Sessions",
     padding: 1,
+    borderColor: theme.border,
   })
 
   const sessionSelect = new SelectRenderable(renderer, {
     width: 48,
     height: 20,
     options: [],
+    backgroundColor: theme.listBackground,
+    textColor: theme.text,
+    focusedBackgroundColor: theme.listFocusedBackground,
+    focusedTextColor: theme.text,
+    selectedBackgroundColor: theme.listSelectedBackground,
+    selectedTextColor: theme.text,
+    descriptionColor: theme.listDescription,
+    selectedDescriptionColor: theme.mutedText,
     showDescription: true,
     showScrollIndicator: true,
     wrapSelection: false,
@@ -258,6 +358,7 @@ export async function startTui(): Promise<void> {
     borderStyle: "single",
     title: "Session Details",
     padding: 1,
+    borderColor: theme.border,
   })
 
   const detailsText = new TextRenderable(renderer, {
@@ -270,6 +371,7 @@ export async function startTui(): Promise<void> {
 
   const footer = new TextRenderable(renderer, {
     content: "Keys: Tab focus | 1-6 filter | Enter/R resume | Mouse select copies | U refresh | Q quit",
+    fg: theme.mutedText,
   })
 
   const status = new TextRenderable(renderer, {
