@@ -26,6 +26,12 @@ bun install
 bun run start
 ```
 
+## CLI flags
+
+- `opensession --help`
+- `opensession --version`
+- `ops --version` (alias)
+
 ## Key bindings
 
 - `Tab`: switch focus between search and session list
@@ -42,3 +48,25 @@ bun run start
 - **Claude Code**: scans `~/.claude` session files and resumes with `claude --resume <session-id>`.
 - **Cursor**: scans known session-ish JSON files; if workspace path is found, opens with `cursor <path>`.
 - **Gemini**: scans common history/session folders and attempts `gemini resume <session-id>` when possible.
+
+## Release and deployment
+
+### Build release artifacts locally
+
+```bash
+bun run build:release
+```
+
+This generates a release archive for your current machine in `dist/release`.
+
+To force a specific target (used by CI):
+
+```bash
+OPEN_SESSION_TARGET=bun-linux-x64 OPEN_SESSION_SUFFIX=linux-x64 bun run build:release
+```
+
+### Curl installer
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/josiahwiebe/opensession/main/scripts/install.sh | bash
+```

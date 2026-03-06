@@ -1,12 +1,14 @@
 {
   "name": "open-session",
+  "version": "0.1.0",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
   "scripts": {
     "dev": "bun run src/index.ts",
     "start": "bun run src/index.ts",
-    "typecheck": "bunx tsc --noEmit"
+    "typecheck": "bunx tsc --noEmit",
+    "build:release": "bash scripts/build-release.sh"
   },
   "devDependencies": {
     "@types/bun": "latest"
