@@ -1,72 +1,80 @@
 # Open Session
 
-OpenTUI app to aggregate local coding-agent sessions in one place, then jump back in fast.
+Open Session is a terminal app for finding and resuming local coding agent sessions across Claude Code, Codex, Cursor, Gemini, and OpenCode.
 
-## What it does
+![Open Session Screenshot](assets/screenshot.png)
 
-- Scans session history from Claude Code, Codex, OpenCode, Cursor, and Gemini.
-- Shows a searchable, unified session list sorted by most recent activity.
-- Displays session metadata and transcript path details in a side panel.
-- Runs a source-specific resume command when available (`Enter` or `r`).
+## Installation
 
-## Platform support
+```bash
+curl -fsSL https://raw.githubusercontent.com/josiahwiebe/opensession/main/scripts/install.sh | bash
+```
+
+## Quick Start
+
+```bash
+opensession
+// or `ops`
+```
+
+Use the arrow keys to browse sessions, type to search, and press Enter to resume the selected session.
+
+## Features
+
+- Aggregate local sessions from multiple coding tools
+- Search and filter sessions from one interface
+- Sort by most recent activity
+- Inspect session metadata and transcript paths
+- Resume supported sessions without digging through local files
+
+## Supported Platforms
 
 - macOS
 - Linux
 
-## Install
+## Supported Sources
+
+- Claude Code
+- OpenAI Codex
+- Cursor
+- Gemini CLI
+- OpenCode
+
+## CLI
+
+```bash
+opensession --help
+opensession --version
+ops --version
+```
+
+## How it works
+
+Open Session scans local session history from supported tools, normalizes the results into a single list, and sorts them by recent activity. When a tool supports resuming from the command line, Open Session can jump directly back into that session.
+
+## Development
+
+### Run from Source
 
 ```bash
 bun install
+bun start
 ```
 
-## Run
-
-```bash
-bun run start
-```
-
-## CLI flags
-
-- `opensession --help`
-- `opensession --version`
-- `ops --version` (alias)
-
-## Key bindings
-
-- `Tab`: switch focus between search and session list
-- `1-6`: jump client filter (All, Claude, Codex, Cursor, Gemini, OpenCode)
-- `Enter`: resume selected session
-- `r`: resume selected session
-- `u`: refresh all sources
-- `q`: quit
-
-## Source behavior
-
-- **Codex**: reads `~/.codex/sessions` and resumes with `codex resume <session-id>`.
-- **OpenCode**: prefers `opencode session list --format json`, falls back to local session files.
-- **Claude Code**: scans `~/.claude` session files and resumes with `claude --resume <session-id>`.
-- **Cursor**: scans known session-ish JSON files; if workspace path is found, opens with `cursor <path>`.
-- **Gemini**: scans common history/session folders and attempts `gemini resume <session-id>` when possible.
-
-## Release and deployment
-
-### Build release artifacts locally
+### Build Release Artifacts
 
 ```bash
 bun run build:release
 ```
 
-This generates a release archive for your current machine in `dist/release`.
+This creates a release archive for the current machine in dist/release.
 
-To force a specific target (used by CI):
+To force a specific target, such as in CI:
 
 ```bash
 OPEN_SESSION_TARGET=bun-linux-x64 OPEN_SESSION_SUFFIX=linux-x64 bun run build:release
 ```
 
-### Curl installer
+## License
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/josiahwiebe/opensession/main/scripts/install.sh | bash
-```
+MIT
