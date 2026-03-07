@@ -1,4 +1,5 @@
 import path from "node:path"
+import * as v from "valibot"
 import type { SessionRecord, SessionSourceId } from "../types"
 import { defaultFileOpenCommand, fileStat, readTextSample, scanFilesByPatterns } from "../utils/fs"
 import { prettySource, truncate } from "../utils/format"
@@ -58,6 +59,107 @@ function cleanQuoted(value: string): string {
   return value.replace(/\\n/g, " ").replace(/\\"/g, '"').trim()
 }
 
+const TextPartSchema = v.object({
+  type: v.optional(v.string()),
+  text: v.optional(v.string()),
+})
+
+type TextPart = v.InferOutput<typeof TextPartSchema>
+
+export function parseWithSchema<const TSchema extends v.BaseSchema<unknown, unknown, v.BaseIssue<unknown>>>(
+  schema: TSchema,
+  value: unknown,
+): v.InferOutput<TSchema> | undefined {
+  const result = v.safeParse(schema, value)
+  return result.success ? result.output : undefined
+}
+
+export function parseJsonWithSchema<const TSchema extends v.BaseSchema<unknown, unknown, v.BaseIssue<unknown>>>(
+  schema: TSchema,
+  rawText: string,
+): v.InferOutput<TSchema> | undefined {
+  const parsed = parseJsonSafe(rawText)
+  return parsed ? parseWithSchema(schema, parsed) : undefined
+}
+
+export function parseJsonLines(rawText: string): unknown[] {
+  return rawText
+    .split("\n")
+    .filter(Boolean)
+    .map(parseJsonSafe)
+    .filter((value): value is unknown => value !== undefined)
+}
+
+export function normalizeTimestamp(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 10_000_000_000 ? value : value * 1000
+  }
+
+  if (typeof value === "string" && value.length > 0) {
+    const parsed = Date.parse(value)
+    return Number.isNaN(parsed) ? undefined : parsed
+  }
+
+  return undefined
+}
+
+export function textFromContent(
+  content: unknown,
+  includePart?: (part: TextPart) => boolean,
+): string | undefined {
+  if (typeof content === "string") {
+    const text = content.trim()
+    return text.length > 0 ? text : undefined
+  }
+
+  if (!Array.isArray(content)) {
+    return undefined
+  }
+
+  const joined = content
+    .map((item) => parseWithSchema(TextPartSchema, item))
+    .filter((part): part is TextPart => Boolean(part))
+    .filter((part) => !includePart || includePart(part))
+    .map((part) => part.text?.trim())
+    .filter((text): text is string => Boolean(text))
+    .join(" ")
+    .trim()
+
+  return joined.length > 0 ? joined : undefined
+}
+
+export function buildSessionRecord(params: {
+  source: SessionSourceId
+  sourceLabel?: string
+  sessionId?: string
+  uidKey?: string
+  title: string
+  summary?: string
+  filePath?: string
+  workspacePath?: string
+  updatedAt: number
+  startedAt?: number
+  resumeAction?: SessionRecord["resumeAction"]
+  resumeHint?: string
+}): SessionRecord {
+  const uidKey = params.uidKey ?? params.sessionId ?? params.filePath ?? params.title
+
+  return {
+    uid: `${params.source}:${uidKey}`,
+    source: params.source,
+    sourceLabel: params.sourceLabel ?? prettySource(params.source),
+    sessionId: params.sessionId,
+    title: params.title,
+    summary: params.summary,
+    filePath: params.filePath,
+    workspacePath: params.workspacePath,
+    updatedAt: params.updatedAt,
+    startedAt: params.startedAt,
+    resumeAction: params.resumeAction,
+    resumeHint: params.resumeHint,
+  }
+}
+
 export async function scanFileBackedSessions(options: {
   source: SessionSourceId
   sourceLabel?: string
@@ -96,11 +198,11 @@ export async function scanFileBackedSessions(options: {
         options.buildResumeAction?.({ filePath, sessionId }) ??
         buildOpenFileResumeAction({ filePath })
 
-      return {
-        uid: `${options.source}:${sessionId ?? filePath}`,
+      return buildSessionRecord({
         source: options.source,
-        sourceLabel: options.sourceLabel ?? prettySource(options.source),
+        sourceLabel: options.sourceLabel,
         sessionId,
+        uidKey: sessionId ?? filePath,
         title: extractLikelyTitle(rawContent, fileName),
         summary: extractLikelySummary(rawContent),
         filePath,
@@ -108,7 +210,7 @@ export async function scanFileBackedSessions(options: {
         startedAt: stat.birthtimeMs,
         resumeAction,
         resumeHint: options.buildResumeHint?.({ filePath, sessionId }),
-      }
+      })
     }),
   )
 

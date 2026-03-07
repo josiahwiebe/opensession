@@ -1,0 +1,5 @@
+{"timestamp":"2026-03-02T09:00:00.000Z","type":"session_meta","payload":{"id":"22222222-2222-2222-2222-222222222222","timestamp":"2026-03-02T09:00:00.000Z","cwd":"/tmp/codex-workspace"}}
+{"timestamp":"2026-03-02T09:00:01.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"# AGENTS.md instructions for /tmp/codex-workspace"}]}}
+not json at all
+{"timestamp":"2026-03-02T09:00:02.000Z","type":"event_msg","payload":{"type":"user_message","message":"Build a session browser"}}
+{"timestamp":"2026-03-02T09:00:03.000Z","type":"event_msg","payload":{"type":"agent_message","message":"Implemented the browser UI."}}

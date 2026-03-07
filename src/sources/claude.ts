@@ -1,8 +1,15 @@
 import path from "node:path"
+import * as v from "valibot"
 import type { SessionRecord, SessionSource } from "../types"
 import { fileStat, readTextSample, readTextTailSample, scanFilesByPatterns } from "../utils/fs"
 import { truncate } from "../utils/format"
-import { parseJsonSafe } from "./shared"
+import {
+  buildSessionRecord,
+  normalizeTimestamp,
+  parseJsonLines,
+  parseWithSchema,
+  textFromContent,
+} from "./shared"
 
 function claudeRoots(): string[] {
   return ["~/.claude"]
@@ -24,18 +31,15 @@ interface ParsedClaudeSession {
   workspacePath?: string
 }
 
-function normalizeDate(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value > 10_000_000_000 ? value : value * 1000
-  }
-
-  if (typeof value === "string" && value.length > 0) {
-    const parsed = Date.parse(value)
-    return Number.isNaN(parsed) ? undefined : parsed
-  }
-
-  return undefined
-}
+const ClaudeLineSchema = v.object({
+  timestamp: v.optional(v.union([v.string(), v.number()])),
+  cwd: v.optional(v.string()),
+  session_id: v.optional(v.string()),
+  sessionId: v.optional(v.string()),
+  role: v.optional(v.string()),
+  message: v.optional(v.object({ content: v.optional(v.unknown()) })),
+  content: v.optional(v.unknown()),
+})
 
 function candidateClaudeText(text: string): string | undefined {
   const normalized = text.replace(/\s+/g, " ").trim()
@@ -51,40 +55,16 @@ function candidateClaudeText(text: string): string | undefined {
 }
 
 function textFromClaudeContent(content: unknown): string | undefined {
-  if (typeof content === "string") {
-    return candidateClaudeText(content)
-  }
+  const text = textFromContent(
+    content,
+    (part) => part.type === "text" || part.type === "input_text" || part.type === "output_text",
+  )
 
-  if (!Array.isArray(content)) {
-    return undefined
-  }
-
-  const joined = content
-    .map((item) => {
-      if (!item || typeof item !== "object") {
-        return undefined
-      }
-
-      const value = item as Record<string, unknown>
-      if ((value.type === "text" || value.type === "input_text" || value.type === "output_text") && typeof value.text === "string") {
-        return candidateClaudeText(value.text)
-      }
-
-      return undefined
-    })
-    .filter((text): text is string => Boolean(text))
-    .join(" ")
-    .trim()
-
-  return joined.length > 0 ? joined : undefined
+  return text ? candidateClaudeText(text) : undefined
 }
 
-function parseClaudeSession(rawText: string, filePath: string): ParsedClaudeSession | undefined {
-  const lines = rawText.split("\n").filter(Boolean)
-  if (lines.length === 0) {
-    return undefined
-  }
-
+/** Parses a Claude transcript JSONL file into the metadata we display. */
+export function parseClaudeSession(rawText: string, filePath: string): ParsedClaudeSession | undefined {
   const userMessages: string[] = []
   const assistantMessages: string[] = []
   let sessionId: string | undefined
@@ -92,41 +72,38 @@ function parseClaudeSession(rawText: string, filePath: string): ParsedClaudeSess
   let startedAt: number | undefined
   let updatedAt: number | undefined
 
-  for (const line of lines) {
-    const parsed = parseJsonSafe(line)
-    if (!parsed || typeof parsed !== "object") {
+  for (const line of parseJsonLines(rawText)) {
+    const parsedLine = parseWithSchema(ClaudeLineSchema, line)
+    if (!parsedLine) {
       continue
     }
 
-    const value = parsed as Record<string, unknown>
-    const timestamp = normalizeDate(value.timestamp)
+    const timestamp = normalizeTimestamp(parsedLine.timestamp)
     if (timestamp) {
       startedAt = startedAt ?? timestamp
       updatedAt = Math.max(updatedAt ?? timestamp, timestamp)
     }
 
-    if (typeof value.cwd === "string" && value.cwd.length > 0) {
-      workspacePath = value.cwd
+    if (parsedLine.cwd) {
+      workspacePath = parsedLine.cwd
     }
 
-    if (typeof value.session_id === "string") {
-      sessionId = value.session_id
-    } else if (typeof value.sessionId === "string") {
-      sessionId = value.sessionId
+    if (parsedLine.session_id) {
+      sessionId = parsedLine.session_id
+    } else if (parsedLine.sessionId) {
+      sessionId = parsedLine.sessionId
     }
 
-    const role = value.role
-    const message = value.message && typeof value.message === "object" ? (value.message as Record<string, unknown>) : undefined
-    const text = textFromClaudeContent(message?.content ?? value.content)
+    const text = textFromClaudeContent(parsedLine.message?.content ?? parsedLine.content)
     if (!text) {
       continue
     }
 
-    if (role === "user") {
+    if (parsedLine.role === "user") {
       userMessages.push(text)
     }
 
-    if (role === "assistant") {
+    if (parsedLine.role === "assistant") {
       assistantMessages.push(text)
     }
   }
@@ -174,8 +151,7 @@ export const claudeSource: SessionSource = {
 
         const sessionId = parsed.sessionId ?? path.basename(filePath).replace(/\.(jsonl?|md)$/i, "")
 
-        return {
-          uid: `claude:${sessionId}`,
+        return buildSessionRecord({
           source: "claude",
           sourceLabel: "Claude",
           sessionId,
@@ -190,7 +166,7 @@ export const claudeSource: SessionSource = {
             args: ["--resume", sessionId],
           },
           resumeHint: "Runs `claude --resume <session-id>`",
-        }
+        })
       }),
     )
 

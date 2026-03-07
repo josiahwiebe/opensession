@@ -1,4 +1,5 @@
 import path from "node:path"
+import * as v from "valibot"
 import type { SessionRecord, SessionSource } from "../types"
 import {
   envPath,
@@ -8,7 +9,13 @@ import {
   scanFilesByPatterns,
 } from "../utils/fs"
 import { truncate } from "../utils/format"
-import { parseJsonSafe } from "./shared"
+import {
+  buildSessionRecord,
+  normalizeTimestamp,
+  parseJsonLines,
+  parseWithSchema,
+  textFromContent,
+} from "./shared"
 
 function codexRoots(): string[] {
   return [envPath("CODEX_HOME") ?? "~/.codex"]
@@ -27,14 +34,27 @@ interface ParsedCodexMeta {
   startedAt?: number
 }
 
-function normalizeDate(value: unknown): number | undefined {
-  if (typeof value === "string" && value.length > 0) {
-    const parsed = Date.parse(value)
-    return Number.isNaN(parsed) ? undefined : parsed
-  }
+const CodexLineSchema = v.object({
+  type: v.string(),
+  payload: v.optional(v.unknown()),
+})
 
-  return undefined
-}
+const CodexSessionMetaPayloadSchema = v.object({
+  id: v.optional(v.string()),
+  cwd: v.optional(v.string()),
+  timestamp: v.optional(v.string()),
+})
+
+const CodexEventPayloadSchema = v.object({
+  type: v.string(),
+  message: v.optional(v.string()),
+})
+
+const CodexMessagePayloadSchema = v.object({
+  type: v.literal("message"),
+  role: v.union([v.literal("user"), v.literal("assistant")]),
+  content: v.array(v.object({ type: v.optional(v.string()), text: v.optional(v.string()) })),
+})
 
 function candidateUserText(text: string): string | undefined {
   const stripped = text
@@ -68,84 +88,79 @@ function candidateUserText(text: string): string | undefined {
   return normalized
 }
 
-/** Parses Codex jsonl transcript lines for metadata. */
-function parseCodexSession(rawText: string): ParsedCodexMeta {
-  const lines = rawText.split("\n").filter(Boolean)
-
+/** Parses Codex JSONL transcript lines into the metadata we display. */
+export function parseCodexSession(rawText: string): ParsedCodexMeta {
   let sessionId: string | undefined
   let workspacePath: string | undefined
   let startedAt: number | undefined
   const userMessages: string[] = []
   let assistantPreview: string | undefined
 
-  for (const line of lines) {
-    const parsed = parseJsonSafe(line)
-    if (!parsed || typeof parsed !== "object") {
+  for (const line of parseJsonLines(rawText)) {
+    const parsedLine = parseWithSchema(CodexLineSchema, line)
+    if (!parsedLine?.payload) {
       continue
     }
 
-    const payload = (parsed as any).payload
-    const type = (parsed as any).type
+    if (parsedLine.type === "session_meta") {
+      const payload = parseWithSchema(CodexSessionMetaPayloadSchema, parsedLine.payload)
+      if (!payload) {
+        continue
+      }
 
-    if (type === "session_meta" && payload && typeof payload === "object") {
-      if (typeof payload.id === "string") {
+      if (payload.id) {
         sessionId = payload.id
       }
-      if (typeof payload.cwd === "string") {
+      if (payload.cwd) {
         workspacePath = payload.cwd
       }
-      startedAt = normalizeDate(payload.timestamp)
-    }
-
-    if (!payload || typeof payload !== "object") {
+      startedAt = normalizeTimestamp(payload.timestamp)
       continue
     }
 
-    if (type === "event_msg" && payload.type === "user_message" && typeof payload.message === "string") {
+    if (parsedLine.type === "event_msg") {
+      const payload = parseWithSchema(CodexEventPayloadSchema, parsedLine.payload)
+      if (!payload?.message) {
+        continue
+      }
+
       const candidate = candidateUserText(payload.message)
+      if (!candidate) {
+        continue
+      }
+
+      if (payload.type === "user_message") {
+        userMessages.push(candidate)
+        continue
+      }
+
+      if (!assistantPreview && payload.type === "agent_message") {
+        assistantPreview = candidate
+      }
+
+      continue
+    }
+
+    const payload = parseWithSchema(CodexMessagePayloadSchema, parsedLine.payload)
+    if (!payload) {
+      continue
+    }
+
+    if (payload.role === "user") {
+      const candidate = candidateUserText(
+        textFromContent(payload.content, (part) => part.type === "input_text") ?? "",
+      )
       if (candidate) {
         userMessages.push(candidate)
       }
-      continue
     }
 
-    if (payload.type === "message" && payload.role === "user" && Array.isArray(payload.content)) {
-      for (const contentPart of payload.content) {
-        if (contentPart?.type === "input_text" && typeof contentPart.text === "string") {
-          const candidate = candidateUserText(contentPart.text)
-          if (candidate) {
-            userMessages.push(candidate)
-          }
-        }
-      }
-    }
-
-    if (
-      !assistantPreview &&
-      type === "event_msg" &&
-      payload.type === "agent_message" &&
-      typeof payload.message === "string"
-    ) {
-      const candidate = candidateUserText(payload.message)
+    if (!assistantPreview && payload.role === "assistant") {
+      const candidate = candidateUserText(
+        textFromContent(payload.content, (part) => part.type === "output_text") ?? "",
+      )
       if (candidate) {
         assistantPreview = candidate
-      }
-    }
-
-    if (
-      !assistantPreview &&
-      payload.type === "message" &&
-      payload.role === "assistant" &&
-      Array.isArray(payload.content)
-    ) {
-      for (const contentPart of payload.content) {
-        if (contentPart?.type === "output_text" && typeof contentPart.text === "string") {
-          const candidate = candidateUserText(contentPart.text)
-          if (candidate) {
-            assistantPreview = candidate
-            break
-          }
-        }
       }
     }
   }
@@ -194,8 +209,7 @@ export const codexSource: SessionSource = {
         const fallbackName = path.basename(filePath)
         const sessionId = parsed.sessionId ?? fallbackName.replace(/\.(jsonl?|md)$/i, "")
 
-        return {
-          uid: `codex:${sessionId}`,
+        return buildSessionRecord({
           source: "codex",
           sourceLabel: "Codex",
           sessionId,
@@ -210,7 +224,7 @@ export const codexSource: SessionSource = {
             args: ["resume", sessionId],
           },
           resumeHint: "Runs `codex resume <session-id>`",
-        }
+        })
       }),
     )
 

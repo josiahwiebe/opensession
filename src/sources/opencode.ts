@@ -7,7 +7,7 @@ import {
   xdgDataHome,
 } from "../utils/fs"
 import { prettySource, truncate } from "../utils/format"
-import { parseJsonSafe } from "./shared"
+import { normalizeTimestamp, parseJsonSafe } from "./shared"
 
 function fallbackRoots(): string[] {
   return [xdgDataHome() + "/opencode"]
@@ -44,19 +44,6 @@ interface OpenCodeSessionRow {
   time_updated: number
   project_worktree: string | null
   project_name: string | null
-}
-
-function normalizeDate(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value > 10_000_000_000 ? value : value * 1000
-  }
-
-  if (typeof value === "string" && value.length > 0) {
-    const date = Date.parse(value)
-    return Number.isNaN(date) ? undefined : date
-  }
-
-  return undefined
 }
 
 function parseParentSessionId(item: unknown): string | undefined {
@@ -105,17 +92,17 @@ function runOpenCodeSessionList(): OpenCodeSessionRecord[] {
         `Session ${sessionId.slice(0, 8)}`
 
       const updatedAt =
-        normalizeDate(item?.updatedAt) ??
-        normalizeDate(item?.updated) ??
-        normalizeDate(item?.updated_at) ??
-        normalizeDate(item?.createdAt) ??
-        normalizeDate(item?.created) ??
+        normalizeTimestamp(item?.updatedAt) ??
+        normalizeTimestamp(item?.updated) ??
+        normalizeTimestamp(item?.updated_at) ??
+        normalizeTimestamp(item?.createdAt) ??
+        normalizeTimestamp(item?.created) ??
         Date.now()
 
       const startedAt =
-        normalizeDate(item?.createdAt) ??
-        normalizeDate(item?.created) ??
-        normalizeDate(item?.created_at) ??
+        normalizeTimestamp(item?.createdAt) ??
+        normalizeTimestamp(item?.created) ??
+        normalizeTimestamp(item?.created_at) ??
         updatedAt
 
       return {

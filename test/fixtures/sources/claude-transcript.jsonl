@@ -1,0 +1,5 @@
+{"timestamp":"2026-03-03T10:00:00.000Z","session_id":"claude-session-123","cwd":"/tmp/claude-workspace","role":"user","message":{"content":[{"type":"text","text":"Initial question"}]}}
+{"timestamp":"2026-03-03T10:01:00.000Z","role":"assistant","message":{"content":[{"type":"text","text":"First answer"}]}}
+this is not valid json
+{"timestamp":"2026-03-03T10:02:00.000Z","role":"user","message":{"content":[{"type":"text","text":"Follow up request"}]}}
+{"timestamp":"2026-03-03T10:03:00.000Z","role":"assistant","message":{"content":[{"type":"text","text":"Latest assistant answer"}]}}

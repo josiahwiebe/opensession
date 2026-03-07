@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "bun run src/index.ts",
     "start": "bun run src/index.ts",
+    "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
     "build:release": "bash scripts/build-release.sh"
   },
@@ -17,6 +18,7 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@opentui/core": "^0.1.86"
+    "@opentui/core": "^0.1.86",
+    "valibot": "^1.2.0"
   }
 }

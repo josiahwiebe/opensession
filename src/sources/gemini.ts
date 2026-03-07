@@ -1,8 +1,9 @@
 import path from "node:path"
+import * as v from "valibot"
 import type { SessionRecord, SessionSource } from "../types"
 import { envPath, fileStat, scanFilesByPatterns } from "../utils/fs"
 import { truncate } from "../utils/format"
-import { parseJsonSafe } from "./shared"
+import { buildSessionRecord, normalizeTimestamp, parseJsonWithSchema, textFromContent } from "./shared"
 
 function geminiRoots(): string[] {
   const home = envPath("GEMINI_CLI_HOME") ?? "~"
@@ -20,105 +21,55 @@ interface GeminiSessionMeta {
   workspacePath?: string
 }
 
-function textFromGeminiPart(part: unknown): string | undefined {
-  if (typeof part === "string") {
-    const text = part.trim()
-    return text.length > 0 ? text : undefined
-  }
+const GeminiMessageSchema = v.object({
+  type: v.optional(v.string()),
+  content: v.optional(v.unknown()),
+  displayContent: v.optional(v.unknown()),
+})
 
-  if (!part || typeof part !== "object") {
+const GeminiSessionSchema = v.object({
+  sessionId: v.string(),
+  messages: v.optional(v.array(GeminiMessageSchema)),
+  summary: v.optional(v.string()),
+  startTime: v.optional(v.union([v.string(), v.number()])),
+  lastUpdated: v.optional(v.union([v.string(), v.number()])),
+  directories: v.optional(v.array(v.string())),
+  kind: v.optional(v.union([v.literal("main"), v.literal("subagent")])),
+})
+
+/** Parses a Gemini session file into the metadata we display. */
+export function parseGeminiSession(rawText: string, filePath: string): GeminiSessionMeta | undefined {
+  const parsed = parseJsonWithSchema(GeminiSessionSchema, rawText)
+  if (!parsed) {
     return undefined
   }
 
-  const value = part as Record<string, unknown>
-  if (typeof value.text === "string" && value.text.trim().length > 0) {
-    return value.text.trim()
-  }
-
-  return undefined
-}
-
-function textFromGeminiContent(content: unknown): string | undefined {
-  if (typeof content === "string") {
-    const text = content.trim()
-    return text.length > 0 ? text : undefined
-  }
-
-  if (Array.isArray(content)) {
-    const joined = content.map(textFromGeminiPart).filter(Boolean).join(" ").trim()
-    return joined.length > 0 ? joined : undefined
-  }
-
-  return textFromGeminiPart(content)
-}
-
-function normalizeDate(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value > 10_000_000_000 ? value : value * 1000
-  }
-
-  if (typeof value === "string" && value.length > 0) {
-    const parsed = Date.parse(value)
-    return Number.isNaN(parsed) ? undefined : parsed
-  }
-
-  return undefined
-}
-
-function parseGeminiSession(rawText: string, filePath: string): GeminiSessionMeta | undefined {
-  const parsed = parseJsonSafe(rawText)
-  if (!parsed || typeof parsed !== "object") {
-    return undefined
-  }
-
-  const value = parsed as Record<string, unknown>
-  const sessionId = typeof value.sessionId === "string" ? value.sessionId : undefined
-  if (!sessionId) {
-    return undefined
-  }
-
-  const messages = Array.isArray(value.messages) ? value.messages : []
+  const messages = parsed.messages ?? []
   const userMessages = messages
-    .map((item) => {
-      if (!item || typeof item !== "object") {
-        return undefined
-      }
-
-      const message = item as Record<string, unknown>
+    .map((message) => {
       if (message.type !== "user") {
         return undefined
       }
 
-      const text = textFromGeminiContent(message.content)
-      if (!text || text.startsWith("/") || text.startsWith("?")) {
-        return undefined
-      }
-
-      return text
+      const text = textFromContent(message.content)
+      return text && !text.startsWith("/") && !text.startsWith("?") ? text : undefined
     })
     .filter((text): text is string => Boolean(text))
 
   const assistantMessages = messages
-    .map((item) => {
-      if (!item || typeof item !== "object") {
-        return undefined
-      }
-
-      const message = item as Record<string, unknown>
+    .map((message) => {
       if (message.type !== "gemini") {
         return undefined
       }
 
-      return textFromGeminiContent(message.displayContent) ?? textFromGeminiContent(message.content)
+      return textFromContent(message.displayContent) ?? textFromContent(message.content)
     })
     .filter((text): text is string => Boolean(text))
 
-  const workspacePath = Array.isArray(value.directories)
-    ? value.directories.find((item): item is string => typeof item === "string" && item.length > 0)
-    : undefined
+  const workspacePath = parsed.directories?.find((item) => item.length > 0)
 
-  const explicitSummary = typeof value.summary === "string" && value.summary.trim().length > 0 ? value.summary.trim() : undefined
-  const kind = value.kind === "subagent" ? "subagent" : value.kind === "main" ? "main" : undefined
+  const explicitSummary = parsed.summary?.trim() || undefined
+  const kind = parsed.kind
   const title = userMessages[0] ? truncate(userMessages[0], 90) : truncate(path.basename(filePath), 90)
 
   let summary = explicitSummary ?? assistantMessages.at(-1) ?? userMessages[1]
@@ -127,11 +78,11 @@ function parseGeminiSession(rawText: string, filePath: string): GeminiSessionMet
   }
 
   return {
-    sessionId,
+    sessionId: parsed.sessionId,
     title,
     summary: summary ? truncate(summary, 180) : undefined,
-    startedAt: normalizeDate(value.startTime),
-    updatedAt: normalizeDate(value.lastUpdated),
+    startedAt: normalizeTimestamp(parsed.startTime),
+    updatedAt: normalizeTimestamp(parsed.lastUpdated),
     workspacePath,
   }
 }
@@ -163,8 +114,7 @@ export const geminiSource: SessionSource = {
           return null
         }
 
-        return {
-          uid: `gemini:${parsed.sessionId}`,
+        return buildSessionRecord({
           source: "gemini",
           sourceLabel: "Gemini",
           sessionId: parsed.sessionId,
@@ -179,7 +129,7 @@ export const geminiSource: SessionSource = {
             args: ["--resume", parsed.sessionId],
           },
           resumeHint: "Runs `gemini --resume <session-id>`",
-        }
+        })
       }),
     )
 
