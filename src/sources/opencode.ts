@@ -1,5 +1,6 @@
 import { Database as SqliteDatabase } from "bun:sqlite"
 import type { LoadMode, SessionRecord, SessionSource } from "../types"
+import { withMtimeCache } from "../utils/cache"
 import {
   fileStat,
   readTextSample,
@@ -205,7 +206,18 @@ async function listFromDatabases(): Promise<OpenCodeSessionRecord[]> {
     maxFiles: 16,
   })
 
-  return files.flatMap((filePath) => readOpenCodeDatabase(filePath))
+  const loaded = await Promise.all(
+    files.map(async (filePath) => {
+      const stat = await fileStat(filePath)
+      if (!stat) {
+        return [] as OpenCodeSessionRecord[]
+      }
+
+      return withMtimeCache(`opencode:db:${filePath}`, stat.mtimeMs, () => readOpenCodeDatabase(filePath))
+    }),
+  )
+
+  return loaded.flat()
 }
 
 function parseOpenCodeSessionMeta(raw: string): ParsedOpenCodeSessionMeta | undefined {
@@ -248,8 +260,10 @@ async function listFallback(): Promise<OpenCodeSessionRecord[]> {
         return null
       }
 
-      const rawContent = await readTextSample(filePath, 8192)
-      const parsed = parseOpenCodeSessionMeta(rawContent)
+      const parsed = await withMtimeCache(`opencode:file:${filePath}`, stat.mtimeMs, async () => {
+        const rawContent = await readTextSample(filePath, 8192)
+        return parseOpenCodeSessionMeta(rawContent)
+      })
       if (!parsed) {
         return null
       }

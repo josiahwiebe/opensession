@@ -2,6 +2,7 @@ import path from "node:path"
 import { Database } from "bun:sqlite"
 import * as v from "valibot"
 import type { LoadMode, SessionRecord, SessionSource } from "../types"
+import { withMtimeCache } from "../utils/cache"
 import {
   fileStat,
   platform,
@@ -250,13 +251,20 @@ export function extractCursorTranscriptPreview(rawText: string): string | undefi
 
 async function readWorkspacePathFromWorkspaceJson(dbPath: string): Promise<string | undefined> {
   const workspaceJsonPath = path.join(path.dirname(dbPath), "workspace.json")
-  const raw = await readTextSample(workspaceJsonPath, 4096)
-  if (!raw) {
+  const stat = await fileStat(workspaceJsonPath)
+  if (!stat) {
     return undefined
   }
 
-  const parsed = parseJsonSafe(raw)
-  return readWorkspacePathFromObject(parsed)
+  return withMtimeCache(`cursor:workspace-json:${workspaceJsonPath}`, stat.mtimeMs, async () => {
+    const raw = await readTextSample(workspaceJsonPath, 4096)
+    if (!raw) {
+      return undefined
+    }
+
+    const parsed = parseJsonSafe(raw)
+    return readWorkspacePathFromObject(parsed)
+  })
 }
 
 async function readCursorGlobalComposerMap(composerIds?: Set<string>): Promise<Map<string, CursorGlobalComposerMeta>> {
@@ -269,16 +277,28 @@ async function readCursorGlobalComposerMap(composerIds?: Set<string>): Promise<M
   const byComposerId = new Map<string, CursorGlobalComposerMeta>()
 
   for (const dbPath of sqliteFiles) {
+    const stat = await fileStat(dbPath)
+    if (!stat) {
+      continue
+    }
+
     try {
-      const db = new Database(dbPath, { readonly: true })
-      const rows = composerIds && composerIds.size > 0
-        ? db
-            .query(`SELECT key, value FROM cursorDiskKV WHERE key IN (${Array.from(composerIds).map(() => "?").join(", ")}) AND value IS NOT NULL`)
-            .all(...Array.from(composerIds).map((id) => `composerData:${id}`)) as Array<{ key?: string; value?: string }>
-        : db
-            .query("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%' AND value IS NOT NULL")
-            .all() as Array<{ key?: string; value?: string }>
-      db.close()
+      const rows = await withMtimeCache(
+        `cursor:global-db:${dbPath}:${Array.from(composerIds ?? []).sort().join(",")}`,
+        stat.mtimeMs,
+        () => {
+          const db = new Database(dbPath, { readonly: true })
+          const result = composerIds && composerIds.size > 0
+            ? db
+                .query(`SELECT key, value FROM cursorDiskKV WHERE key IN (${Array.from(composerIds).map(() => "?").join(", ")}) AND value IS NOT NULL`)
+                .all(...Array.from(composerIds).map((id) => `composerData:${id}`)) as Array<{ key?: string; value?: string }>
+            : db
+                .query("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%' AND value IS NOT NULL")
+                .all() as Array<{ key?: string; value?: string }>
+          db.close()
+          return result
+        },
+      )
 
       for (const row of rows) {
         if (typeof row.value !== "string") {
@@ -351,15 +371,19 @@ async function listCursorSqliteSessions(mode: LoadMode): Promise<SessionRecord[]
 
       let composerRows: CursorComposerMeta[] = []
       try {
-        const db = new Database(dbPath, { readonly: true })
-        const row = db
-          .query("SELECT value FROM ItemTable WHERE key = 'composer.composerData' LIMIT 1")
-          .get() as { value?: string } | undefined
-        db.close()
+        composerRows = await withMtimeCache(`cursor:workspace-db:${dbPath}`, stat.mtimeMs, () => {
+          const db = new Database(dbPath, { readonly: true })
+          const row = db
+            .query("SELECT value FROM ItemTable WHERE key = 'composer.composerData' LIMIT 1")
+            .get() as { value?: string } | undefined
+          db.close()
 
-        if (typeof row?.value === "string") {
-          composerRows = readCursorComposerMeta(row.value)
-        }
+          if (typeof row?.value === "string") {
+            return readCursorComposerMeta(row.value)
+          }
+
+          return [] as CursorComposerMeta[]
+        })
       } catch {
         return [] as SessionRecord[]
       }
@@ -454,18 +478,22 @@ async function listTranscriptFallbackSessions(): Promise<SessionRecord[]> {
 
       const composerId = path.basename(filePath, path.extname(filePath))
       const projectLabel = path.basename(path.dirname(path.dirname(filePath)))
-      const rawHead = await readTextSample(filePath, 4096)
-      const rawTail = await readTextTailSample(filePath, 32_000)
-      const title = extractCursorTranscriptPreview(rawHead) ?? `Agent transcript ${composerId.slice(0, 12)}`
-      const summary = extractCursorTranscriptPreview(rawTail)
+      const preview = await withMtimeCache(`cursor:transcript:${filePath}`, stat.mtimeMs, async () => {
+        const rawHead = await readTextSample(filePath, 4096)
+        const rawTail = await readTextTailSample(filePath, 32_000)
+        return {
+          title: extractCursorTranscriptPreview(rawHead) ?? `Agent transcript ${composerId.slice(0, 12)}`,
+          summary: extractCursorTranscriptPreview(rawTail),
+        }
+      })
 
       return buildSessionRecord({
         source: "cursor",
         sourceLabel: "Cursor",
         sessionId: composerId,
         uidKey: `transcript:${composerId}`,
-        title: truncate(title, 90),
-        summary: summary ? truncate(summary, 180) : truncate(projectLabel, 180),
+        title: truncate(preview.title, 90),
+        summary: preview.summary ? truncate(preview.summary, 180) : truncate(projectLabel, 180),
         filePath,
         updatedAt: stat.mtimeMs,
         startedAt: stat.birthtimeMs,

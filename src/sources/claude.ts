@@ -1,6 +1,7 @@
 import path from "node:path"
 import * as v from "valibot"
 import type { LoadMode, SessionRecord, SessionSource } from "../types"
+import { withMtimeCache } from "../utils/cache"
 import { fileStat, readTextSample, readTextTailSample, scanFilesByPatterns } from "../utils/fs"
 import { truncate } from "../utils/format"
 import {
@@ -142,9 +143,11 @@ export const claudeSource: SessionSource = {
           return null
         }
 
-        const rawText = await readTextSample(filePath, 64_000)
-        const tailText = await readTextTailSample(filePath, 64_000)
-        const parsed = parseClaudeSession(`${rawText}\n${tailText}`, filePath)
+        const parsed = await withMtimeCache(`claude:parsed:${filePath}`, stat.mtimeMs, async () => {
+          const rawText = await readTextSample(filePath, 64_000)
+          const tailText = await readTextTailSample(filePath, 64_000)
+          return parseClaudeSession(`${rawText}\n${tailText}`, filePath)
+        })
         if (!parsed) {
           return null
         }

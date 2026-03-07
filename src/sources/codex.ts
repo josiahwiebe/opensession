@@ -1,6 +1,7 @@
 import path from "node:path"
 import * as v from "valibot"
 import type { LoadMode, SessionRecord, SessionSource } from "../types"
+import { withMtimeCache } from "../utils/cache"
 import {
   envPath,
   fileStat,
@@ -203,9 +204,11 @@ export const codexSource: SessionSource = {
           return null
         }
 
-        const rawText = await readTextSample(filePath, 64_000)
-        const tailText = await readTextTailSample(filePath, 64_000)
-        const parsed = parseCodexSession(`${rawText}\n${tailText}`)
+        const parsed = await withMtimeCache(`codex:parsed:${filePath}`, stat.mtimeMs, async () => {
+          const rawText = await readTextSample(filePath, 64_000)
+          const tailText = await readTextTailSample(filePath, 64_000)
+          return parseCodexSession(`${rawText}\n${tailText}`)
+        })
         const fallbackName = path.basename(filePath)
         const sessionId = parsed.sessionId ?? fallbackName.replace(/\.(jsonl?|md)$/i, "")
 

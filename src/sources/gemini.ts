@@ -1,6 +1,7 @@
 import path from "node:path"
 import * as v from "valibot"
 import type { LoadMode, SessionRecord, SessionSource } from "../types"
+import { withMtimeCache } from "../utils/cache"
 import { envPath, fileStat, scanFilesByPatterns } from "../utils/fs"
 import { truncate } from "../utils/format"
 import { buildSessionRecord, normalizeTimestamp, parseJsonWithSchema, textFromContent } from "./shared"
@@ -104,12 +105,14 @@ export const geminiSource: SessionSource = {
           return null
         }
 
-        const rawText = await Bun.file(filePath).text().catch(() => "")
-        if (!rawText) {
-          return null
-        }
+        const parsed = await withMtimeCache(`gemini:parsed:${filePath}`, stat.mtimeMs, async () => {
+          const rawText = await Bun.file(filePath).text().catch(() => "")
+          if (!rawText) {
+            return undefined
+          }
 
-        const parsed = parseGeminiSession(rawText, filePath)
+          return parseGeminiSession(rawText, filePath)
+        })
         if (!parsed) {
           return null
         }
