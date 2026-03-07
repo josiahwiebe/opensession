@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test"
 import { parseClaudeSession } from "../src/sources/claude"
 import { parseCodexSession } from "../src/sources/codex"
+import {
+  extractCursorTranscriptPreview,
+  readCursorComposerMeta,
+  readCursorGlobalComposer,
+} from "../src/sources/cursor"
 import { parseGeminiSession } from "../src/sources/gemini"
 
 async function readFixture(name: string): Promise<string> {
@@ -43,5 +48,59 @@ describe("session parsers", () => {
     expect(parsed?.workspacePath).toBe("/tmp/claude-workspace")
     expect(parsed?.startedAt).toBe(Date.parse("2026-03-03T10:00:00.000Z"))
     expect(parsed?.updatedAt).toBe(Date.parse("2026-03-03T10:03:00.000Z"))
+  })
+
+  test("parses Cursor workspace composer metadata", () => {
+    const parsed = readCursorComposerMeta(
+      JSON.stringify({
+        allComposers: [
+          {
+            composerId: "cursor-composer-1",
+            name: "Fix Cursor session listing",
+            createdAt: 1772800000000,
+            lastUpdatedAt: 1772800100000,
+            unifiedMode: "agent",
+          },
+        ],
+      }),
+    )
+
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]?.composerId).toBe("cursor-composer-1")
+    expect(parsed[0]?.name).toBe("Fix Cursor session listing")
+    expect(parsed[0]?.updatedAt).toBe(1772800100000)
+    expect(parsed[0]?.unifiedMode).toBe("agent")
+  })
+
+  test("parses Cursor global composer preview from conversation map", () => {
+    const parsed = readCursorGlobalComposer(
+      JSON.stringify({
+        composerId: "cursor-composer-1",
+        name: "Fix Cursor session listing",
+        createdAt: 1772800000000,
+        lastUpdatedAt: 1772800100000,
+        unifiedMode: "agent",
+        conversation: [
+          { bubbleId: "user-1", type: 1 },
+          { bubbleId: "assistant-1", type: 2, text: "The chats are stored in workspaceStorage and enriched by transcripts." },
+        ],
+      }),
+    )
+
+    expect(parsed?.composerId).toBe("cursor-composer-1")
+    expect(parsed?.name).toBe("Fix Cursor session listing")
+    expect(parsed?.preview).toBe("The chats are stored in workspaceStorage and enriched by transcripts.")
+  })
+
+  test("extracts latest readable Cursor transcript preview", () => {
+    const preview = extractCursorTranscriptPreview([
+      "User: find the bug",
+      "```ts",
+      "const broken = true",
+      "```",
+      "Assistant: the regression is in the global state index.",
+    ].join("\n"))
+
+    expect(preview).toBe("Assistant: the regression is in the global state index.")
   })
 })
