@@ -21,8 +21,17 @@ export interface SessionRecord {
   resumeHint?: string
 }
 
+export type LoadMode = "fast" | "full"
+
+export interface SessionStreamEvent {
+  type: "source-start" | "batch" | "source-complete" | "complete"
+  source?: SessionSourceId
+  mode?: LoadMode
+  sessions?: SessionRecord[]
+}
+
 export interface SessionSource {
   id: SessionSourceId
   label: string
-  listSessions: () => Promise<SessionRecord[]>
+  listSessions: (mode?: LoadMode) => Promise<SessionRecord[]>
 }

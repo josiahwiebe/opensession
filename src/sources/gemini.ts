@@ -1,6 +1,6 @@
 import path from "node:path"
 import * as v from "valibot"
-import type { SessionRecord, SessionSource } from "../types"
+import type { LoadMode, SessionRecord, SessionSource } from "../types"
 import { envPath, fileStat, scanFilesByPatterns } from "../utils/fs"
 import { truncate } from "../utils/format"
 import { buildSessionRecord, normalizeTimestamp, parseJsonWithSchema, textFromContent } from "./shared"
@@ -90,11 +90,11 @@ export function parseGeminiSession(rawText: string, filePath: string): GeminiSes
 export const geminiSource: SessionSource = {
   id: "gemini",
   label: "Gemini",
-  async listSessions(): Promise<SessionRecord[]> {
+  async listSessions(mode: LoadMode = "full"): Promise<SessionRecord[]> {
     const files = await scanFilesByPatterns({
       roots: geminiRoots(),
       patterns: GEMINI_PATTERNS,
-      maxFiles: 120,
+      maxFiles: mode === "fast" ? 24 : 120,
     })
 
     const sessions = await Promise.all(

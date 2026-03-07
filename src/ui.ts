@@ -14,16 +14,19 @@ import {
   type Selection,
 } from "@opentui/core"
 import { resumeSession } from "./resume"
-import { loadSessions } from "./sources"
-import type { SessionRecord, SessionSourceId } from "./types"
+import { loadSessionsIncremental } from "./sources"
+import type { SessionRecord, SessionSourceId, SessionStreamEvent } from "./types"
 import { formatRelative, formatTimestamp, truncate } from "./utils/format"
 
 interface SessionViewState {
   all: SessionRecord[]
   filtered: SessionRecord[]
   selectedIndex: number
+  selectedUid?: string
   filterText: string
   sourceFilter: "all" | SessionSourceId
+  refreshing: boolean
+  completedSources: Set<SessionSourceId>
 }
 
 interface SourceFilterOption {
@@ -190,7 +193,35 @@ function renderSessionDetails(session?: SessionRecord): string {
   return lines.join("\n")
 }
 
+function mergeSessions(existing: SessionRecord[], incoming: SessionRecord[]): SessionRecord[] {
+  const byUid = new Map(existing.map((session) => [session.uid, session]))
+
+  for (const session of incoming) {
+    const previous = byUid.get(session.uid)
+    if (!previous) {
+      byUid.set(session.uid, session)
+      continue
+    }
+
+    const newer = session.updatedAt >= previous.updatedAt ? session : previous
+    const older = newer === session ? previous : session
+    byUid.set(session.uid, {
+      ...older,
+      ...newer,
+      summary: newer.summary ?? older.summary,
+      filePath: newer.filePath ?? older.filePath,
+      workspacePath: newer.workspacePath ?? older.workspacePath,
+      startedAt: newer.startedAt ?? older.startedAt,
+      resumeAction: newer.resumeAction ?? older.resumeAction,
+      resumeHint: newer.resumeHint ?? older.resumeHint,
+    })
+  }
+
+  return Array.from(byUid.values()).sort((a, b) => b.updatedAt - a.updatedAt)
+}
+
 function applyFilter(state: SessionViewState): void {
+  const previousSelectedUid = state.selectedUid
   const query = state.filterText.trim().toLowerCase()
   state.filtered = state.all.filter((session) => {
     if (state.sourceFilter !== "all" && session.source !== state.sourceFilter) {
@@ -215,7 +246,18 @@ function applyFilter(state: SessionViewState): void {
     return haystack.includes(query)
   })
 
-  state.selectedIndex = 0
+  if (state.filtered.length === 0) {
+    state.selectedIndex = 0
+    state.selectedUid = undefined
+    return
+  }
+
+  const selectedIndex = previousSelectedUid
+    ? state.filtered.findIndex((session) => session.uid === previousSelectedUid)
+    : -1
+
+  state.selectedIndex = selectedIndex >= 0 ? selectedIndex : 0
+  state.selectedUid = state.filtered[state.selectedIndex]?.uid
 }
 
 function sourceFilterLabel(filter: "all" | SessionSourceId): string {
@@ -243,8 +285,11 @@ export async function startTui(): Promise<void> {
     all: [],
     filtered: [],
     selectedIndex: 0,
+    selectedUid: undefined,
     filterText: "",
     sourceFilter: "all",
+    refreshing: true,
+    completedSources: new Set(),
   }
 
   let focusTarget: "search" | "client" | "list" = "list"
@@ -412,6 +457,7 @@ export async function startTui(): Promise<void> {
       const nextIndex = Math.min(state.selectedIndex, options.length - 1)
       sessionSelect.setSelectedIndex(nextIndex)
       state.selectedIndex = nextIndex
+      state.selectedUid = state.filtered[nextIndex]?.uid
       detailsText.content = renderSessionDetails(state.filtered[nextIndex])
     } else {
       sessionSelect.setSelectedIndex(0)
@@ -420,7 +466,9 @@ export async function startTui(): Promise<void> {
   }
 
   const baseStatusText = () =>
-    `Loaded ${state.filtered.length} of ${state.all.length} sessions (${sourceFilterLabel(state.sourceFilter)})`
+    state.refreshing
+      ? `Loaded ${state.filtered.length} of ${state.all.length} sessions (${sourceFilterLabel(state.sourceFilter)}) - refreshing`
+      : `Loaded ${state.filtered.length} of ${state.all.length} sessions (${sourceFilterLabel(state.sourceFilter)})`
 
   const setBaseStatus = () => {
     status.content = baseStatusText()
@@ -446,16 +494,57 @@ export async function startTui(): Promise<void> {
     clientTabs.tabWidth = Math.max(9, Math.floor(clientTabsWidth / SOURCE_FILTERS.length) - 1)
   }
 
-  const reloadSessions = async () => {
-    status.content = "Refreshing sessions..."
-    const sessions = await loadSessions()
-    state.all = sessions
+  let reloadGeneration = 0
+
+  const applyIncomingSessions = (sessions: SessionRecord[]) => {
+    if (sessions.length === 0) {
+      return
+    }
+
+    state.all = mergeSessions(state.all, sessions)
     const previousIndex = clientTabs.getSelectedIndex()
     clientTabs.setOptions(buildClientTabOptions(state.all))
     clientTabs.setSelectedIndex(Math.max(0, previousIndex))
     applyFilter(state)
     renderList()
     setBaseStatus()
+  }
+
+  const handleStreamEvent = (event: SessionStreamEvent) => {
+    if (event.type === "batch" && event.sessions) {
+      applyIncomingSessions(event.sessions)
+      return
+    }
+
+    if (event.type === "source-complete" && event.source) {
+      state.completedSources.add(event.source)
+      return
+    }
+
+    if (event.type === "complete") {
+      state.refreshing = false
+      if (event.sessions) {
+        state.all = event.sessions
+      }
+      applyFilter(state)
+      renderList()
+      setBaseStatus()
+    }
+  }
+
+  const reloadSessions = async () => {
+    const generation = ++reloadGeneration
+    state.refreshing = true
+    state.completedSources.clear()
+    setBaseStatus()
+
+    for await (const event of loadSessionsIncremental()) {
+      if (generation !== reloadGeneration) {
+        return
+      }
+
+      handleStreamEvent(event)
+    }
   }
 
   const launchSelected = async () => {
@@ -611,6 +700,7 @@ export async function startTui(): Promise<void> {
   sessionSelect.on(SelectRenderableEvents.SELECTION_CHANGED, (index: number) => {
     state.selectedIndex = index
     const selected = state.filtered[index]
+    state.selectedUid = selected?.uid
     detailsText.content = renderSessionDetails(selected)
   })
 
@@ -697,7 +787,7 @@ export async function startTui(): Promise<void> {
   })
 
   syncViewportLayout()
-  await reloadSessions()
+  void reloadSessions()
   clientTabs.setSelectedIndex(0)
   sessionSelect.focus()
 }

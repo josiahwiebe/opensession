@@ -1,6 +1,6 @@
 import path from "node:path"
 import * as v from "valibot"
-import type { SessionRecord, SessionSource } from "../types"
+import type { LoadMode, SessionRecord, SessionSource } from "../types"
 import { fileStat, readTextSample, readTextTailSample, scanFilesByPatterns } from "../utils/fs"
 import { truncate } from "../utils/format"
 import {
@@ -128,11 +128,11 @@ export function parseClaudeSession(rawText: string, filePath: string): ParsedCla
 export const claudeSource: SessionSource = {
   id: "claude",
   label: "Claude",
-  async listSessions(): Promise<SessionRecord[]> {
+  async listSessions(mode: LoadMode = "full"): Promise<SessionRecord[]> {
     const files = await scanFilesByPatterns({
       roots: claudeRoots(),
       patterns: CLAUDE_PATTERNS,
-      maxFiles: 200,
+      maxFiles: mode === "fast" ? 40 : 200,
     })
 
     const sessions = await Promise.all(

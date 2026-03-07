@@ -1,5 +1,5 @@
 import { Database as SqliteDatabase } from "bun:sqlite"
-import type { SessionRecord, SessionSource } from "../types"
+import type { LoadMode, SessionRecord, SessionSource } from "../types"
 import {
   fileStat,
   readTextSample,
@@ -375,9 +375,13 @@ function collapseSubagentSessions(sessions: OpenCodeSessionRecord[]): SessionRec
 export const opencodeSource: SessionSource = {
   id: "opencode",
   label: "OpenCode",
-  async listSessions(): Promise<SessionRecord[]> {
-    const fromCli = runOpenCodeSessionList()
+  async listSessions(mode: LoadMode = "full"): Promise<SessionRecord[]> {
     const fromDatabases = await listFromDatabases()
+    if (mode === "fast") {
+      return collapseSubagentSessions(dedupeOpencodeSessions(fromDatabases))
+    }
+
+    const fromCli = runOpenCodeSessionList()
     const fromFiles = await listFallback()
     const deduped = dedupeOpencodeSessions([...fromCli, ...fromDatabases, ...fromFiles])
     return collapseSubagentSessions(deduped)

@@ -1,6 +1,6 @@
 import path from "node:path"
 import * as v from "valibot"
-import type { SessionRecord, SessionSource } from "../types"
+import type { LoadMode, SessionRecord, SessionSource } from "../types"
 import {
   envPath,
   fileStat,
@@ -189,11 +189,11 @@ export function parseCodexSession(rawText: string): ParsedCodexMeta {
 export const codexSource: SessionSource = {
   id: "codex",
   label: "Codex",
-  async listSessions(): Promise<SessionRecord[]> {
+  async listSessions(mode: LoadMode = "full"): Promise<SessionRecord[]> {
     const files = await scanFilesByPatterns({
       roots: codexRoots(),
       patterns: CODEX_PATTERNS,
-      maxFiles: 180,
+      maxFiles: mode === "fast" ? 36 : 180,
     })
 
     const sessions = await Promise.all(

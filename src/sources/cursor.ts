@@ -1,7 +1,7 @@
 import path from "node:path"
 import { Database } from "bun:sqlite"
 import * as v from "valibot"
-import type { SessionRecord, SessionSource } from "../types"
+import type { LoadMode, SessionRecord, SessionSource } from "../types"
 import {
   fileStat,
   platform,
@@ -259,7 +259,7 @@ async function readWorkspacePathFromWorkspaceJson(dbPath: string): Promise<strin
   return readWorkspacePathFromObject(parsed)
 }
 
-async function readCursorGlobalComposerMap(): Promise<Map<string, CursorGlobalComposerMeta>> {
+async function readCursorGlobalComposerMap(composerIds?: Set<string>): Promise<Map<string, CursorGlobalComposerMeta>> {
   const sqliteFiles = await scanFilesByPatterns({
     roots: [cursorGlobalRoot()],
     patterns: CURSOR_GLOBAL_DB_PATTERNS,
@@ -271,9 +271,13 @@ async function readCursorGlobalComposerMap(): Promise<Map<string, CursorGlobalCo
   for (const dbPath of sqliteFiles) {
     try {
       const db = new Database(dbPath, { readonly: true })
-      const rows = db
-        .query("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%' AND value IS NOT NULL")
-        .all() as Array<{ key?: string; value?: string }>
+      const rows = composerIds && composerIds.size > 0
+        ? db
+            .query(`SELECT key, value FROM cursorDiskKV WHERE key IN (${Array.from(composerIds).map(() => "?").join(", ")}) AND value IS NOT NULL`)
+            .all(...Array.from(composerIds).map((id) => `composerData:${id}`)) as Array<{ key?: string; value?: string }>
+        : db
+            .query("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%' AND value IS NOT NULL")
+            .all() as Array<{ key?: string; value?: string }>
       db.close()
 
       for (const row of rows) {
@@ -328,16 +332,14 @@ async function readCursorTranscriptMap(): Promise<Map<string, string>> {
   )
 }
 
-async function listCursorSqliteSessions(): Promise<SessionRecord[]> {
-  const globalComposerMap = await readCursorGlobalComposerMap()
-
+async function listCursorSqliteSessions(mode: LoadMode): Promise<SessionRecord[]> {
   const sqliteFiles = await scanFilesByPatterns({
     roots: [cursorWorkspaceRoot()],
     patterns: CURSOR_WORKSPACE_DB_PATTERNS,
-    maxFiles: 220,
+    maxFiles: mode === "fast" ? 40 : 220,
   })
 
-  const sessions = await Promise.all(
+  const workspaceSessions = await Promise.all(
     sqliteFiles.map(async (dbPath) => {
       const stat = await fileStat(dbPath)
       if (!stat) {
@@ -363,20 +365,17 @@ async function listCursorSqliteSessions(): Promise<SessionRecord[]> {
       }
 
       return composerRows.map((composer): SessionRecord => {
-        const globalComposer = globalComposerMap.get(composer.composerId)
-        const mode = globalComposer?.unifiedMode ?? composer.unifiedMode
-        const titleBase = globalComposer?.name ?? composer.name ?? workspaceLabel
-        const title = titleBase === workspaceLabel && mode
-          ? `${workspaceLabel} (${mode})`
+        const composerMode = composer.unifiedMode
+        const titleBase = composer.name ?? workspaceLabel
+        const title = titleBase === workspaceLabel && composerMode
+          ? `${workspaceLabel} (${composerMode})`
           : titleBase
         const updatedAt =
-          globalComposer?.updatedAt ??
           composer.updatedAt ??
-          globalComposer?.createdAt ??
           composer.createdAt ??
           stat.mtimeMs
-        const startedAt = globalComposer?.createdAt ?? composer.createdAt ?? updatedAt
-        const summary = globalComposer?.preview ?? workspacePath
+        const startedAt = composer.createdAt ?? updatedAt
+        const summary = workspacePath
 
         return buildSessionRecord({
           source: "cursor",
@@ -402,7 +401,41 @@ async function listCursorSqliteSessions(): Promise<SessionRecord[]> {
     }),
   )
 
-  return sessions.flat()
+  const sessions = workspaceSessions.flat()
+  if (mode === "fast" || sessions.length === 0) {
+    return sessions
+  }
+
+  const composerIds = new Set(sessions.map((session) => session.sessionId).filter((value): value is string => Boolean(value)))
+  const globalComposerMap = await readCursorGlobalComposerMap(composerIds)
+
+  return sessions.map((session) => {
+    const globalComposer = session.sessionId ? globalComposerMap.get(session.sessionId) : undefined
+    if (!globalComposer) {
+      return session
+    }
+
+    const mode = globalComposer.unifiedMode
+    const workspaceLabel = session.workspacePath ? path.basename(session.workspacePath) : session.title
+    const titleBase = globalComposer.name ?? session.title
+    const title = titleBase === workspaceLabel && mode
+      ? `${workspaceLabel} (${mode})`
+      : titleBase
+
+    return buildSessionRecord({
+      ...session,
+      source: "cursor",
+      sourceLabel: "Cursor",
+      sessionId: session.sessionId,
+      title: truncate(title, 90),
+      summary: truncate(globalComposer.preview ?? session.summary ?? session.workspacePath ?? session.title, 180),
+      workspacePath: session.workspacePath,
+      updatedAt: globalComposer.updatedAt ?? session.updatedAt,
+      startedAt: globalComposer.createdAt ?? session.startedAt,
+      resumeAction: session.resumeAction,
+      resumeHint: session.resumeHint,
+    })
+  })
 }
 
 async function listTranscriptFallbackSessions(): Promise<SessionRecord[]> {
@@ -465,8 +498,8 @@ function dedupeCursorSessions(sessions: SessionRecord[]): SessionRecord[] {
 export const cursorSource: SessionSource = {
   id: "cursor",
   label: "Cursor",
-  async listSessions(): Promise<SessionRecord[]> {
-    const fromSqlite = await listCursorSqliteSessions()
+  async listSessions(mode: LoadMode = "full"): Promise<SessionRecord[]> {
+    const fromSqlite = await listCursorSqliteSessions(mode)
     if (fromSqlite.length > 0) {
       return dedupeCursorSessions(fromSqlite)
     }
