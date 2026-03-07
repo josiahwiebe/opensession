@@ -7,7 +7,7 @@ Open Session is a terminal app for finding and resuming local coding agent sessi
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/josiahwiebe/opensession/main/scripts/install.sh | bash
+curl -fsSL https://jwww.me/opensession/install | bash
 ```
 
 ## Quick Start
