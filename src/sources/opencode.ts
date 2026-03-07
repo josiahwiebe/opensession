@@ -1,24 +1,22 @@
+import { Database as SqliteDatabase } from "bun:sqlite"
 import type { SessionRecord, SessionSource } from "../types"
-import { fileStat, readTextSample, scanFilesByPatterns } from "../utils/fs"
+import {
+  fileStat,
+  readTextSample,
+  scanFilesByPatterns,
+  xdgDataHome,
+} from "../utils/fs"
 import { prettySource, truncate } from "../utils/format"
 import { parseJsonSafe } from "./shared"
 
-/** De-duplicates path candidates while preserving order. */
-function uniquePaths(paths: string[]): string[] {
-  return Array.from(new Set(paths))
+function fallbackRoots(): string[] {
+  return [xdgDataHome() + "/opencode"]
 }
 
-const FALLBACK_ROOTS = uniquePaths([
-  "~/.local/share/opencode",
-  "~/.local/share/OpenCode",
-  "~/Library/Application Support/opencode",
-  "~/Library/Application Support/OpenCode",
-  "~/.config/opencode",
-  "~/.config/OpenCode",
-  "~/.opencode",
-])
+const DATABASE_PATTERNS = ["opencode*.db"]
 
 const FALLBACK_PATTERNS = [
+  "session/*/*.json",
   "storage/session/**/ses_*.json",
   "project/**/storage/session/info/ses_*.json",
   "project/**/storage/session/share/ses_*.json",
@@ -35,6 +33,17 @@ interface ParsedOpenCodeSessionMeta {
 
 interface OpenCodeSessionRecord extends SessionRecord {
   parentSessionId?: string
+}
+
+interface OpenCodeSessionRow {
+  id: string
+  parent_id: string | null
+  directory: string
+  title: string
+  time_created: number
+  time_updated: number
+  project_worktree: string | null
+  project_name: string | null
 }
 
 function normalizeDate(value: unknown): number | undefined {
@@ -133,6 +142,85 @@ function runOpenCodeSessionList(): OpenCodeSessionRecord[] {
     .filter((value: OpenCodeSessionRecord | null): value is OpenCodeSessionRecord => Boolean(value))
 }
 
+function readOpenCodeDatabase(filePath: string): OpenCodeSessionRecord[] {
+  let db: SqliteDatabase | undefined
+
+  try {
+    db = new SqliteDatabase(filePath, { create: false, readonly: true })
+    const rows = db
+      .query(
+        `
+          select
+            session.id,
+            session.parent_id,
+            session.directory,
+            session.title,
+            session.time_created,
+            session.time_updated,
+            project.worktree as project_worktree,
+            project.name as project_name
+          from session
+          left join project on project.id = session.project_id
+          where session.time_archived is null
+          order by session.time_updated desc, session.id desc
+          limit 1000
+        `,
+      )
+      .all() as OpenCodeSessionRow[]
+
+    return rows
+      .map((row): OpenCodeSessionRecord | null => {
+        if (!row.id || typeof row.id !== "string") {
+          return null
+        }
+
+        const workspacePath =
+          (typeof row.directory === "string" && row.directory) ||
+          (typeof row.project_worktree === "string" && row.project_worktree && row.project_worktree !== "/"
+            ? row.project_worktree
+            : undefined)
+
+        const summary =
+          (typeof row.project_name === "string" && row.project_name.trim().length > 0
+            ? row.project_name.trim()
+            : undefined) ?? workspacePath
+
+        return {
+          uid: `opencode:${row.id}`,
+          source: "opencode",
+          sourceLabel: "OpenCode",
+          sessionId: row.id,
+          parentSessionId: row.parent_id ?? undefined,
+          title: truncate(row.title || `Session ${row.id.slice(0, 14)}`, 90),
+          summary: summary ? truncate(summary, 180) : undefined,
+          workspacePath,
+          updatedAt: row.time_updated,
+          startedAt: row.time_created,
+          resumeAction: {
+            command: "opencode",
+            args: ["--session", row.id],
+          },
+          resumeHint: "Runs `opencode --session <id>`",
+        }
+      })
+      .filter((value): value is OpenCodeSessionRecord => Boolean(value))
+  } catch {
+    return []
+  } finally {
+    db?.close(false)
+  }
+}
+
+async function listFromDatabases(): Promise<OpenCodeSessionRecord[]> {
+  const files = await scanFilesByPatterns({
+    roots: fallbackRoots(),
+    patterns: DATABASE_PATTERNS,
+    maxFiles: 16,
+  })
+
+  return files.flatMap((filePath) => readOpenCodeDatabase(filePath))
+}
+
 function parseOpenCodeSessionMeta(raw: string): ParsedOpenCodeSessionMeta | undefined {
   const parsed = parseJsonSafe(raw)
   if (!parsed || typeof parsed !== "object") {
@@ -161,7 +249,7 @@ function parseOpenCodeSessionMeta(raw: string): ParsedOpenCodeSessionMeta | unde
 
 async function listFallback(): Promise<OpenCodeSessionRecord[]> {
   const files = await scanFilesByPatterns({
-    roots: FALLBACK_ROOTS,
+    roots: fallbackRoots(),
     patterns: FALLBACK_PATTERNS,
     maxFiles: 5000,
   })
@@ -302,8 +390,9 @@ export const opencodeSource: SessionSource = {
   label: "OpenCode",
   async listSessions(): Promise<SessionRecord[]> {
     const fromCli = runOpenCodeSessionList()
+    const fromDatabases = await listFromDatabases()
     const fromFiles = await listFallback()
-    const deduped = dedupeOpencodeSessions([...fromCli, ...fromFiles])
+    const deduped = dedupeOpencodeSessions([...fromCli, ...fromDatabases, ...fromFiles])
     return collapseSubagentSessions(deduped)
   },
 }

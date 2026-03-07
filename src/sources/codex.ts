@@ -1,17 +1,39 @@
 import path from "node:path"
 import type { SessionRecord, SessionSource } from "../types"
-import { fileStat, readTextSample, scanFilesByPatterns } from "../utils/fs"
+import {
+  envPath,
+  fileStat,
+  readTextSample,
+  readTextTailSample,
+  scanFilesByPatterns,
+} from "../utils/fs"
 import { truncate } from "../utils/format"
 import { parseJsonSafe } from "./shared"
 
-const CODEX_ROOTS = ["~/.codex/sessions"]
-const CODEX_PATTERNS = ["**/*.jsonl", "**/*.json"]
+function codexRoots(): string[] {
+  return [envPath("CODEX_HOME") ?? "~/.codex"]
+}
+
+const CODEX_PATTERNS = [
+  "sessions/*/*/*/rollout-*.jsonl",
+  "sessions/**/*.jsonl",
+]
 
 interface ParsedCodexMeta {
   sessionId?: string
   title?: string
   summary?: string
   workspacePath?: string
+  startedAt?: number
+}
+
+function normalizeDate(value: unknown): number | undefined {
+  if (typeof value === "string" && value.length > 0) {
+    const parsed = Date.parse(value)
+    return Number.isNaN(parsed) ? undefined : parsed
+  }
+
+  return undefined
 }
 
 function candidateUserText(text: string): string | undefined {
@@ -52,6 +74,7 @@ function parseCodexSession(rawText: string): ParsedCodexMeta {
 
   let sessionId: string | undefined
   let workspacePath: string | undefined
+  let startedAt: number | undefined
   const userMessages: string[] = []
   let assistantPreview: string | undefined
 
@@ -71,9 +94,18 @@ function parseCodexSession(rawText: string): ParsedCodexMeta {
       if (typeof payload.cwd === "string") {
         workspacePath = payload.cwd
       }
+      startedAt = normalizeDate(payload.timestamp)
     }
 
     if (!payload || typeof payload !== "object") {
+      continue
+    }
+
+    if (type === "event_msg" && payload.type === "user_message" && typeof payload.message === "string") {
+      const candidate = candidateUserText(payload.message)
+      if (candidate) {
+        userMessages.push(candidate)
+      }
       continue
     }
 
@@ -85,6 +117,18 @@ function parseCodexSession(rawText: string): ParsedCodexMeta {
             userMessages.push(candidate)
           }
         }
+      }
+    }
+
+    if (
+      !assistantPreview &&
+      type === "event_msg" &&
+      payload.type === "agent_message" &&
+      typeof payload.message === "string"
+    ) {
+      const candidate = candidateUserText(payload.message)
+      if (candidate) {
+        assistantPreview = candidate
       }
     }
 
@@ -123,6 +167,7 @@ function parseCodexSession(rawText: string): ParsedCodexMeta {
     workspacePath,
     title,
     summary,
+    startedAt,
   }
 }
 
@@ -131,7 +176,7 @@ export const codexSource: SessionSource = {
   label: "Codex",
   async listSessions(): Promise<SessionRecord[]> {
     const files = await scanFilesByPatterns({
-      roots: CODEX_ROOTS,
+      roots: codexRoots(),
       patterns: CODEX_PATTERNS,
       maxFiles: 180,
     })
@@ -144,7 +189,8 @@ export const codexSource: SessionSource = {
         }
 
         const rawText = await readTextSample(filePath, 64_000)
-        const parsed = parseCodexSession(rawText)
+        const tailText = await readTextTailSample(filePath, 64_000)
+        const parsed = parseCodexSession(`${rawText}\n${tailText}`)
         const fallbackName = path.basename(filePath)
         const sessionId = parsed.sessionId ?? fallbackName.replace(/\.(jsonl?|md)$/i, "")
 
@@ -158,7 +204,7 @@ export const codexSource: SessionSource = {
           workspacePath: parsed.workspacePath,
           filePath,
           updatedAt: stat.mtimeMs,
-          startedAt: stat.birthtimeMs,
+          startedAt: parsed.startedAt ?? stat.birthtimeMs,
           resumeAction: {
             command: "codex",
             args: ["resume", sessionId],

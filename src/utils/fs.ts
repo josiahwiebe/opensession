@@ -4,6 +4,24 @@ import { access } from "node:fs/promises"
 
 export const HOME_DIR = os.homedir()
 
+/** De-duplicates path candidates while preserving order. */
+export function uniquePaths(paths: string[]): string[] {
+  const seen = new Set<string>()
+  const ordered: string[] = []
+
+  for (const candidate of paths) {
+    const normalized = candidate.trim()
+    if (!normalized || seen.has(normalized)) {
+      continue
+    }
+
+    seen.add(normalized)
+    ordered.push(normalized)
+  }
+
+  return ordered
+}
+
 export interface BasicFileStat {
   mtimeMs: number
   birthtimeMs: number
@@ -25,6 +43,37 @@ export function expandHome(candidate: string): string {
   }
 
   return candidate
+}
+
+/** Returns a trimmed environment path when set. */
+export function envPath(key: string): string | undefined {
+  const value = process.env[key]
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined
+}
+
+/** Returns the XDG data home, matching `xdg-basedir`. */
+export function xdgDataHome(): string {
+  return envPath("XDG_DATA_HOME") ?? path.join(HOME_DIR, ".local", "share")
+}
+
+/** Returns likely macOS Application Support roots for the provided app names. */
+export function macosAppSupportRoots(appNames: string[]): string[] {
+  return uniquePaths(appNames.map((appName) => path.join(HOME_DIR, "Library", "Application Support", appName)))
+}
+
+/** Returns likely Linux XDG config/data/state roots for the provided app names. */
+export function linuxXdgRoots(appNames: string[]): string[] {
+  const configHome = envPath("XDG_CONFIG_HOME") ?? path.join(HOME_DIR, ".config")
+  const dataHome = envPath("XDG_DATA_HOME") ?? path.join(HOME_DIR, ".local", "share")
+  const stateHome = envPath("XDG_STATE_HOME") ?? path.join(HOME_DIR, ".local", "state")
+
+  return uniquePaths(
+    appNames.flatMap((appName) => [
+      path.join(configHome, appName),
+      path.join(dataHome, appName),
+      path.join(stateHome, appName),
+    ]),
+  )
 }
 
 /** Checks whether a path exists on disk. */
@@ -59,6 +108,18 @@ export async function readTextSample(filePath: string, maxBytes = 16_384): Promi
   }
 }
 
+/** Reads a small trailing slice from a text file. */
+export async function readTextTailSample(filePath: string, maxBytes = 16_384): Promise<string> {
+  try {
+    const file = Bun.file(filePath)
+    const stat = await file.stat()
+    const start = Math.max(0, stat.size - maxBytes)
+    return await file.slice(start, stat.size).text()
+  } catch {
+    return ""
+  }
+}
+
 /** Scans files across roots using multiple glob patterns. */
 export async function scanFilesByPatterns(options: {
   roots: string[]
@@ -66,13 +127,17 @@ export async function scanFilesByPatterns(options: {
   maxFiles?: number
 }): Promise<string[]> {
   const maxFiles = options.maxFiles ?? 300
+  const roots = uniquePaths(options.roots.map(expandHome))
   const discovered = new Set<string>()
+  const hardLimit = Math.max(maxFiles * 12, 1200)
+  const perRootLimit = Math.max(Math.ceil((maxFiles * 4) / Math.max(roots.length, 1)), 150)
 
-  for (const rootCandidate of options.roots) {
-    const root = expandHome(rootCandidate)
+  for (const root of roots) {
     if (!(await pathExists(root))) {
       continue
     }
+
+    let discoveredFromRoot = 0
 
     for (const pattern of options.patterns) {
       const glob = new Bun.Glob(pattern)
@@ -83,15 +148,24 @@ export async function scanFilesByPatterns(options: {
         onlyFiles: true,
         followSymlinks: false,
       })) {
+        const before = discovered.size
         discovered.add(filePath)
-        if (discovered.size >= maxFiles * 3) {
+        if (discovered.size > before) {
+          discoveredFromRoot += 1
+        }
+
+        if (discoveredFromRoot >= perRootLimit || discovered.size >= hardLimit) {
           break
         }
       }
 
-      if (discovered.size >= maxFiles * 3) {
+      if (discoveredFromRoot >= perRootLimit || discovered.size >= hardLimit) {
         break
       }
+    }
+
+    if (discovered.size >= hardLimit) {
+      break
     }
   }
 
